@@ -37,6 +37,7 @@ def open(
     """Open a browser-based file explorer for a remote SSH host."""
     import asyncio
     import secrets
+    import threading
 
     from src.daemon.server import create_app
     from src.daemon.tls import ensure_tls_certificates
@@ -52,6 +53,24 @@ def open(
 
     # Ensure TLS certificates
     cert_path, key_path = ensure_tls_certificates(CONFIG_DIR)
+
+    # Non-blocking update check — prints a warning if GitHub has a newer version.
+    # Runs in a daemon thread so it never delays daemon startup.
+    def _check_update() -> None:
+        try:
+            from src.update_check import check_update
+
+            result = check_update()
+        except Exception:
+            return
+        if result:
+            local, remote = result
+            console.print(
+                f"[yellow]⚠ Update available: surf-ssh {local} → {remote} on GitHub "
+                f"(git pull and re-install to upgrade)[/yellow]"
+            )
+
+    threading.Thread(target=_check_update, daemon=True).start()
 
     # Find available port
     actual_port = _find_available_port(port)
