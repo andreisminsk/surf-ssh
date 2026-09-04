@@ -141,6 +141,13 @@ Configuration and certificates are stored in `~/.surf-ssh/`:
 └── sessions/       # Active session tokens
 ```
 
+## Feedback
+
+We welcome feedback, bug reports, and suggestions:
+
+- **Telegram:** [@MartiAi_Feedback_bot](https://t.me/MartiAi_Feedback_bot)
+- **GitHub Issues:** [surf-ssh/issues](https://github.com/andreisminsk/surf-ssh/issues)
+
 ## License
 
 Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
