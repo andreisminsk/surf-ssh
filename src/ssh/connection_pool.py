@@ -7,7 +7,7 @@ import logging
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import asyncssh
 
@@ -120,6 +120,11 @@ class ConnectionPool:
         self._reaper_interval = 5.0
         self._grace_period = 10.0  # seconds after last client leaves before closing SSH
         self._last_client_left: dict[str, float] = {}  # host → timestamp
+        self._auto_exit = True  # auto-exit daemon when no live clients remain
+        self._auto_exit_grace = 20.0  # seconds with zero clients before shutdown
+        self._all_gone_since: float | None = None  # timestamp when all clients left
+        self._ever_had_clients = False  # arms auto-exit only after first client
+        self._shutdown_callback: Callable[[], None] | None = None
 
     async def get_connection(self, host: str) -> asyncssh.SSHClientConnection:
         """Get or create an SSH connection for the given host alias."""
@@ -272,6 +277,20 @@ class ConnectionPool:
         """Return the number of live clients for a host."""
         return self._client_registry.get_live_count(host)
 
+    def set_auto_exit(self, enabled: bool, callback: Callable[[], None] | None = None) -> None:
+        """Configure auto-exit behavior.
+
+        When enabled, the reaper triggers the shutdown callback after
+        ``_auto_exit_grace`` seconds with zero live clients across all hosts.
+        """
+        self._auto_exit = enabled
+        self._shutdown_callback = callback
+
+    def _get_total_live_clients(self) -> int:
+        """Return total live clients across all hosts."""
+        hosts = set(self._client_registry._clients.keys())
+        return sum(self._client_registry.get_live_count(h) for h in hosts)
+
     # ── Reaper ───────────────────────────────────────────────────
 
     def start_reaper(self) -> None:
@@ -331,6 +350,25 @@ class ConnectionPool:
                 self._last_access.pop(host, None)
             self._client_registry.clear_host(host)
             self._last_client_left.pop(host, None)
+
+        # 3. Auto-exit: shut down daemon if no live clients across ALL hosts.
+        # Only arms after at least one client has connected (so a freshly
+        # started daemon with no clients doesn't immediately exit).
+        if self._auto_exit and self._shutdown_callback:
+            total_live = self._get_total_live_clients()
+            if total_live == 0:
+                if self._ever_had_clients:
+                    if self._all_gone_since is None:
+                        self._all_gone_since = now
+                    elif now - self._all_gone_since >= self._auto_exit_grace:
+                        logger.info(
+                            "No live clients for %.0fs — requesting daemon shutdown",
+                            self._auto_exit_grace,
+                        )
+                        self._shutdown_callback()
+            else:
+                self._ever_had_clients = True
+                self._all_gone_since = None
 
     async def close_all(self) -> None:
         """Close all connections on shutdown."""

@@ -11,6 +11,7 @@ import {
 import { useConnection } from './hooks/useConnection';
 import { useFileSystem } from './hooks/useFileSystem';
 import { useLiveness } from './hooks/useLiveness';
+import { api, HostInfo } from './api/client';
 
 interface Tab {
   id: string;
@@ -37,6 +38,64 @@ function tabIcon(tab: Tab) {
   if (tab.type === 'files') return <FileTextIcon color="var(--accent)" size={14} />;
   if (tab.type === 'remote') return <TerminalIcon color="var(--green)" size={14} />;
   return <MonitorIcon color="var(--yellow)" size={14} />;
+}
+
+function HostPicker({ onPick }: { onPick: (host: string) => void }) {
+  const [hosts, setHosts] = useState<HostInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    api.listHosts()
+      .then(data => { setHosts(data.hosts); setLoading(false); })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, []);
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
+      <div style={{ textAlign: 'center', maxWidth: 500, width: '90%' }}>
+        <h1>🏄 surf ssh</h1>
+        <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem', marginBottom: '1.5rem' }}>
+          Select a host to connect
+        </p>
+        {loading && <p style={{ color: 'var(--text-secondary)' }}>Loading hosts…</p>}
+        {error && <p style={{ color: 'var(--error, #e06c75)' }}>Error: {error}</p>}
+        {!loading && !error && hosts.length === 0 && (
+          <p style={{ color: 'var(--text-secondary)' }}>
+            No hosts found in ~/.ssh/config
+          </p>
+        )}
+        {!loading && !error && hosts.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            {hosts.map(h => (
+              <button
+                key={h.host}
+                onClick={() => onPick(h.host)}
+                style={{
+                  padding: '0.75rem 1rem',
+                  background: 'var(--bg-secondary, #1e1e2e)',
+                  border: '1px solid var(--border, #333346)',
+                  borderRadius: '6px',
+                  color: 'var(--text, #cdd6f4)',
+                  cursor: 'pointer',
+                  fontSize: '0.95rem',
+                  textAlign: 'left',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <span style={{ color: 'var(--accent, #89b4fa)' }}>{h.host}</span>
+                <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                  {h.status === 'connected' ? '🟢 connected' : '⚪ disconnected'}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function App() {
@@ -173,16 +232,11 @@ function App() {
   }
 
   if (!host) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center' }}>
-            <h1>🏄 surf ssh</h1>
-          <p style={{ color: 'var(--text-secondary)', marginTop: '1rem' }}>
-            No host specified. Usage: <code>surf-ssh open &lt;host-alias&gt;</code>
-          </p>
-        </div>
-      </div>
-    );
+    return <HostPicker onPick={(h) => {
+      const params = new URLSearchParams(window.location.search);
+      params.set('host', h);
+      window.location.search = params.toString();
+    }} />;
   }
 
   // Index maps for title computation

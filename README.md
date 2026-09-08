@@ -9,6 +9,8 @@ A local-first developer tool that provides a browser-based file system explorer 
 - **Remote terminal** — Interactive PTY terminal via WebSocket (xterm.js)
 - **Local console** — Local PTY terminal (bash/zsh/sh on Unix, PowerShell/CMD/WSL on Windows) via WebSocket
 - **Liveness tracking** — Server-initiated ping/pong heartbeat; a background reaper closes SSH connections for dead clients
+- **Auto-exit** — Daemon shuts down automatically when the browser disconnects (opt out with `--no-auto-exit`)
+- **Daemon mode** — Run without a specific host for LaunchDaemon/systemd; clients pick a host from the UI
 - **Security** — Local-only binding, session token → HttpOnly cookie, path traversal prevention, SSRF mitigation via CSP
 - **Zero config** — Reuses `~/.ssh/config` host aliases and keys
 - **Cross-platform** — Works on macOS and Windows
@@ -22,17 +24,29 @@ pip install -e .
 # Build the UI
 cd ui && npm install && npm run build && cd ..
 
-# Open a remote host
+# Open a remote host (auto-exit on, opens browser)
 surf-ssh open my-server
 
-# Or without opening a browser
+# Without opening a browser
 surf-ssh open my-server --no-browser
+
+# Keep daemon running after browser closes
+surf-ssh open my-server --no-auto-exit
+
+# Daemon mode — no host, clients pick from UI (for LaunchDaemon/systemd)
+surf-ssh daemon
+
+# Daemon mode with browser
+surf-ssh daemon --browser
+
+# Daemon on a custom port
+surf-ssh daemon -p 9443
 
 # List available hosts from ~/.ssh/config
 surf-ssh hosts
 ```
 
-The daemon starts on `https://localhost:8443` and opens a browser automatically. A self-signed CA certificate is generated on first run and stored in `~/.surf-ssh/`.
+The daemon starts on `https://localhost:8443`. `surf-ssh open` opens a browser automatically; `surf-ssh daemon` does not. A self-signed CA certificate is generated on first run and stored in `~/.surf-ssh/`.
 
 ## Architecture
 
@@ -94,6 +108,14 @@ surf-ssh/
 - **SSRF**: CSP `img-src 'self'` blocks external image loads from rendered content
 - **HTML sandbox**: `sandbox=""` iframe prevents script execution and API access
 - **Liveness reaper**: A background task periodically closes SSH connections whose clients have stopped responding to heartbeats, preventing connection leaks
+
+## Daemon Mode
+
+`surf-ssh daemon` starts the server without a specific host. The browser shows a host picker listing all aliases from `~/.ssh/config`. This is designed for persistent deployment via LaunchDaemon (macOS) or systemd (Linux).
+
+**Port behavior:** The daemon uses a strict port — if a healthy daemon is already running, it exits cleanly (exit 0). If the port is occupied by another process, it exits with an error (exit 1). This prevents duplicate daemons and works correctly with service managers' restart policies.
+
+**Auto-exit:** Always off in daemon mode. Use `surf-ssh open` if you want the daemon to shut down when the browser disconnects.
 
 ## Killing a Stale Daemon
 

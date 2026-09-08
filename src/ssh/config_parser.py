@@ -28,6 +28,8 @@ class SSHConfigParser:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
+            # Strip inline comments (e.g. "Host my-server # production")
+            stripped = re.sub(r'\s#.*$', '', stripped)
             parts = stripped.split()
             if len(parts) >= 2 and parts[0].lower() == "host":
                 for h in parts[1:]:

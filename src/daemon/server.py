@@ -84,8 +84,14 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-def create_app(session_manager: SessionManager) -> FastAPI:
-    """Create and configure the FastAPI application."""
+def create_app(session_manager: SessionManager, auto_exit: bool = True) -> FastAPI:
+    """Create and configure the FastAPI application.
+
+    Args:
+        session_manager: Manages session tokens.
+        auto_exit: If True, the daemon shuts down when no browser clients
+            remain connected for a grace period.
+    """
     app = FastAPI(
         title="Surf SSH",
         version="0.1.0",
