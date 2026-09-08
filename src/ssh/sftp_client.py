@@ -37,13 +37,24 @@ class SFTPClient:
                 sftp.exit()
 
     async def stat(self, host: str, path: str) -> asyncssh.SFTPAttrs:
-        """Get file metadata."""
+        """Get file metadata (follows symlinks)."""
         conn = await self._pool.get_connection(host)
         sem = self._pool.get_sftp_semaphore(host)
         async with sem:
             sftp = await conn.start_sftp_client()
             try:
                 return await sftp.stat(path)
+            finally:
+                sftp.exit()
+
+    async def lstat(self, host: str, path: str) -> asyncssh.SFTPAttrs:
+        """Get file metadata without following symlinks."""
+        conn = await self._pool.get_connection(host)
+        sem = self._pool.get_sftp_semaphore(host)
+        async with sem:
+            sftp = await conn.start_sftp_client()
+            try:
+                return await sftp.lstat(path)
             finally:
                 sftp.exit()
 

@@ -54,9 +54,13 @@ async def get_file(
 
         # Check if it's a directory
         stat_info = await sftp.stat(host, validated)
-        from asyncssh import SFTPAttrs
 
-        if stat_info.permissions and (stat_info.permissions & 0o040000):
+        if stat_info.permissions is not None:
+            is_dir = bool(stat_info.permissions & 0o040000)
+        else:
+            # Fallback: check if stat longname starts with 'd'
+            is_dir = bool(getattr(stat_info, "longname", "") and stat_info.longname[0] == "d")
+        if is_dir:
             raise HTTPException(status_code=400, detail="Path is a directory, not a file")
 
         file_size = stat_info.size or 0
@@ -104,7 +108,10 @@ async def get_stat(
 
     try:
         stat_info = await sftp.stat(host, validated)
-        is_dir = bool(stat_info.permissions and (stat_info.permissions & 0o040000))
+        if stat_info.permissions is not None:
+            is_dir = bool(stat_info.permissions & 0o040000)
+        else:
+            is_dir = bool(getattr(stat_info, "longname", "") and stat_info.longname[0] == "d")
         modified = None
         if stat_info.mtime:
             modified = datetime.fromtimestamp(stat_info.mtime, tz=timezone.utc)

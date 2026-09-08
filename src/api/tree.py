@@ -20,6 +20,27 @@ DEFAULT_LIMIT = 500
 MAX_LIMIT = 5000
 
 
+def _is_symlink(entry: asyncssh.SFTPName) -> bool:
+    """Check if an SFTP entry is a symlink."""
+    if entry.attrs.permissions is not None:
+        return bool(entry.attrs.permissions & 0o120000)
+    if entry.longname:
+        return entry.longname[0] == "l"
+    return False
+
+
+def _is_dir_from_attrs(entry: asyncssh.SFTPName) -> bool:
+    """Check if an SFTP entry is a directory based on readdir attrs.
+
+    Does NOT follow symlinks — use _resolve_is_directory for that.
+    """
+    if entry.attrs.permissions is not None:
+        return bool(entry.attrs.permissions & 0o040000)
+    if entry.longname:
+        return entry.longname[0] == "d"
+    return False
+
+
 def get_sftp_client() -> SFTPClient:
     raise NotImplementedError("SFTP client not configured")
 
@@ -61,7 +82,7 @@ async def _build_tree(
     entries = await sftp.list_dir(host, path)
     # Filter out . and .. entries — they cause infinite recursion in the UI
     entries = [e for e in entries if e.filename not in (".", "..")]
-    entries.sort(key=lambda e: (not e.attrs.permissions or not (e.attrs.permissions & 0o040000), e.filename))
+    entries.sort(key=lambda e: (not _is_dir_from_attrs(e), e.filename))
 
     truncated = len(entries) > limit
     entries = entries[:limit]
@@ -69,7 +90,17 @@ async def _build_tree(
     children: list[TreeNode] = []
     for entry in entries:
         entry_path = str(PurePosixPath(path) / entry.filename)
-        is_dir = bool(entry.attrs.permissions and (entry.attrs.permissions & 0o040000))
+        is_dir = _is_dir_from_attrs(entry)
+        # Follow symlinks to determine if the target is a directory
+        if not is_dir and _is_symlink(entry):
+            try:
+                target_stat = await sftp.stat(host, entry_path)
+                if target_stat.permissions is not None:
+                    is_dir = bool(target_stat.permissions & 0o040000)
+                elif getattr(target_stat, "longname", ""):
+                    is_dir = target_stat.longname[0] == "d"
+            except asyncssh.Error:
+                pass  # Broken symlink — treat as file
         modified = None
         if entry.attrs.mtime:
             modified = datetime.fromtimestamp(entry.attrs.mtime, tz=timezone.utc)
