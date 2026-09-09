@@ -182,17 +182,12 @@ def open(
 
     # Open browser in a short-lived background thread before server starts
     if not no_browser:
-        # Open a browser with a freshly minted token — the token goes
-        # straight to the browser, never to stdout/logs.
-        def _open_browser() -> None:
-            try:
-                url = _mint_url_via_socket(timeout=10.0)
-                if url:
-                    webbrowser.open(url)
-            except Exception:
-                pass
-
-        threading.Thread(target=lambda: (time.sleep(0.5), _open_browser()), daemon=True).start()
+        # open mode: the one-shot token URL is already in hand — open it
+        # directly (no control socket exists in this mode).
+        threading.Thread(
+            target=lambda: (time.sleep(0.5), webbrowser.open(url)),
+            daemon=True,
+        ).start()
 
     # On Windows, install SIGINT handler via signal.signal() before
     # asyncio.run(). This gives immediate feedback and a watchdog thread
@@ -429,6 +424,61 @@ def url(
     console.print(result)
     if open_browser:
         webbrowser.open(result)
+
+
+@app.command()
+def setup_2fa() -> None:
+    """Enable TOTP 2FA for daemon-mode browser access.
+
+    Prints a QR code to scan with Google Authenticator (or any TOTP app),
+    then asks for one code to confirm. Also generates 10 single-use
+    backup codes — shown ONCE, save them now.
+    """
+    import qrcode
+
+    from src.security.totp import TotpManager
+
+    mgr = TotpManager(CONFIG_DIR)
+    if mgr.is_enabled():
+        console.print("[yellow]2FA is already enabled.[/yellow] Disable first with: surf-ssh disable-2fa")
+        raise typer.Exit(1)
+
+    secret, uri, backup_codes = mgr.setup()
+
+    console.print("[green]Scan this QR code with your authenticator app:[/green]\n")
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(uri)
+    qr.print_ascii(out=console.file)
+    console.print(f"\n[dim]Manual entry secret: {secret}[/dim]")
+
+    code = typer.prompt("Enter the 6-digit code to confirm")
+    if not mgr.confirm_setup(secret, code, backup_codes):
+        console.print("[red]Code did not verify — 2FA not enabled.[/red]")
+        raise typer.Exit(1)
+
+    console.print("[green]2FA enabled.[/green]")
+    console.print("\n[yellow]Backup codes (shown once — save them now):[/yellow]")
+    for bc in backup_codes:
+        console.print(f"  [cyan]{bc}[/cyan]")
+    console.print(
+        "\n[dim]Browser access: open https://localhost:8443 and enter a code. "
+        "CLI access is unchanged: surf-ssh url[/dim]"
+    )
+
+
+@app.command()
+def disable_2fa() -> None:
+    """Disable 2FA (recovery path — removes the TOTP secret)."""
+    from src.security.totp import TotpManager
+
+    mgr = TotpManager(CONFIG_DIR)
+    if not mgr.is_enabled():
+        console.print("2FA is not enabled.")
+        raise typer.Exit(0)
+    if not typer.confirm("Disable 2FA? The TOTP secret will be deleted"):
+        raise typer.Exit(0)
+    mgr.disable()
+    console.print("[green]2FA disabled.[/green] Direct browser access now requires surf-ssh url.")
 
 
 @app.command()

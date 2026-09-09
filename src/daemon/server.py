@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import asyncio
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from src.api.auth import router as auth_router
 from src.api.files import router as files_router
 from src.api.hosts import router as hosts_router
 from src.api.liveness import router as liveness_router
@@ -43,7 +45,7 @@ if sys.platform == "win32":
 class SessionAuthMiddleware(BaseHTTPMiddleware):
     """Validates session cookie on all API requests except the token exchange endpoint."""
 
-    EXEMPT_PATHS = {"/api/v1/auth/exchange", "/api/v1/health"}
+    EXEMPT_PATHS = {"/api/v1/auth/exchange", "/api/v1/health", "/api/v1/auth/verify-totp"}
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -126,6 +128,12 @@ def create_app(session_manager: SessionManager, auto_exit: bool = True) -> FastA
     app.state.sftp_client = sftp_client
     app.state.config_parser = config_parser
 
+    # TOTP 2FA (daemon mode browser-direct path) — see dev-docs/2FA-ARCH.md
+    from src.security.totp import TotpManager
+
+    totp_manager = TotpManager(Path.home() / ".surf-ssh")
+    app.state.totp_manager = totp_manager
+
     # Dependency overrides
     from src.api.hosts import get_pool, get_config_parser, get_sftp_client as get_sftp_hosts
     from src.api.files import get_pool as get_pool_files, get_sftp_client
@@ -144,6 +152,7 @@ def create_app(session_manager: SessionManager, auto_exit: bool = True) -> FastA
 
     # Routers
     api_prefix = "/api/v1"
+    app.include_router(auth_router, prefix=api_prefix)
     app.include_router(hosts_router, prefix=api_prefix)
     app.include_router(files_router, prefix=api_prefix)
     app.include_router(tree_router, prefix=api_prefix)

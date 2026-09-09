@@ -8,6 +8,7 @@ import {
   FileTextIcon, MonitorIcon, TerminalIcon, CloseIcon,
   PlusIcon, ChevronDownIcon,
 } from './components/icons';
+import { TotpChallenge } from './components/TotpChallenge';
 import { useConnection } from './hooks/useConnection';
 import { useFileSystem } from './hooks/useFileSystem';
 import { useLiveness } from './hooks/useLiveness';
@@ -49,9 +50,9 @@ function HostPicker({ onPick }: { onPick: (host: string) => void }) {
     api.listHosts()
       .then(data => { setHosts(data.hosts); setLoading(false); })
       .catch(e => {
-        setError(
+          setError(
           e.message.includes('Unauthorized')
-            ? 'Unauthorized — restart surf-ssh and open the authenticated URL it prints.'
+            ? 'Unauthorized — run surf-ssh url to connect.'
             : e.message
         );
         setLoading(false);
@@ -114,8 +115,7 @@ function UnauthorizedScreen() {
           This browser has no valid surf-ssh session.
         </p>
         <p style={{ color: 'var(--text-secondary)' }}>
-          Restart <code>surf-ssh</code> and open the authenticated URL it prints
-          (it looks like <code>https://localhost:8443/api/v1/auth/exchange?token=…</code>).
+          Run <code>surf-ssh url</code> in a terminal and open the URL it prints.
         </p>
       </div>
     </div>
@@ -127,6 +127,25 @@ function App() {
   const host = params.get('host') || '';
   const urlPath = params.get('path') || '';
   const [unauthorized, setUnauthorized] = useState(false);
+  const [totpEnabled, setTotpEnabled] = useState<boolean | null>(null);
+
+  // Check whether 2FA is available on this daemon (drives the 401 screen)
+  useEffect(() => {
+    fetch('/api/v1/auth/verify-totp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(r => setTotpEnabled(r.status !== 404))
+      .catch(() => setTotpEnabled(false));
+  }, []);
+
+  // Daemon mode (no ?host= param): the host-scoped 401 probes below
+  // early-return on empty host, so probe auth here — otherwise HostPicker
+  // renders and swallows the 401 as an inline error instead of routing
+  // to the TOTP challenge.
+  useEffect(() => {
+    if (host) return;
+    fetch('/api/v1/hosts', { credentials: 'include' })
+      .then(r => { if (r.status === 401) setUnauthorized(true); })
+      .catch(() => {});
+  }, [host]);
   const [rootPath, setRootPath] = useState(urlPath || '/');
   const [homePath, setHomePath] = useState(urlPath || '/');
 
@@ -263,6 +282,9 @@ function App() {
   }
 
   if (unauthorized) {
+    if (totpEnabled) {
+      return <TotpChallenge onAuthenticated={() => { setUnauthorized(false); refreshAll([]); }} />;
+    }
     return <UnauthorizedScreen />;
   }
 

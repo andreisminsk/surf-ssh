@@ -12,6 +12,7 @@ A local-first developer tool that provides a browser-based file system explorer 
 - **Auto-exit** — Daemon shuts down automatically when the browser disconnects (opt out with `--no-auto-exit`)
 - **Daemon mode** — Run without a specific host for LaunchDaemon/systemd; clients pick a host from the UI
 - **Security** — Local-only binding, session token → HttpOnly cookie, path traversal prevention, SSRF mitigation via CSP
+- **2FA (daemon mode)** — Optional TOTP challenge for direct browser access; CLI path (`surf-ssh url`) unchanged
 - **Zero config** — Reuses `~/.ssh/config` host aliases and keys
 - **Cross-platform** — Works on macOS and Windows
 
@@ -36,6 +37,9 @@ surf-ssh open my-server --no-auto-exit
 # Daemon mode — no host, clients pick from UI (for LaunchDaemon/systemd)
 # Prints an authenticated URL — open it to establish a session
 surf-ssh daemon
+
+# Enable 2FA for direct browser access (one-time)
+surf-ssh setup-2fa
 
 # Daemon mode with browser
 surf-ssh daemon --browser
@@ -113,6 +117,7 @@ surf-ssh/
 - **TLS keys**: Private keys are written with `0600` permissions
 - **Docs off by default**: OpenAPI/Swagger UI disabled unless `SURF_SSH_DEV=1`
 - **Update check**: At most one outbound GitHub request per 24h; disable with `--no-update-check`
+- **2FA (daemon mode)**: `surf-ssh setup-2fa` enables a TOTP challenge for direct browser access (`https://localhost:8443` → 6-digit code → session). Rate-limited (5 attempts/min, exponential lockout). Recovery: backup codes or `surf-ssh disable-2fa`. See [dev-docs/2FA-ARCH.md](dev-docs/2FA-ARCH.md)
 
 ## Daemon Mode
 

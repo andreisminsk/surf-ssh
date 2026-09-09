@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surf-ssh"
-version = "0.3.0"
+version = "0.4.0"
 description = "Browser-based file explorer and terminal for remote SSH machines"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,6 +17,8 @@ dependencies = [
     "truststore>=0.8.0",
     "pydantic>=2.6.0",
     "websockets>=12.0",
+    "pyotp>=2.9.0",
+    "qrcode>=7.4.0",
     "pywinpty>=2.0.0; sys_platform == \"win32\"",
 ]
 
