@@ -62,6 +62,7 @@ class AdHocHostRequest(BaseModel):
 
 class PasswordAuthRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=1024)
+    username: str | None = Field(None, min_length=1, max_length=64)
 
 
 class TrustRequest(BaseModel):
@@ -121,6 +122,8 @@ async def authenticate_host(
             headers={"Retry-After": str(retry_after)},
         )
 
+    if req.username:
+        pool.set_username_override(host, req.username)
     pool.set_password(host, req.password)
     try:
         await pool.get_connection(host)
@@ -147,6 +150,20 @@ async def authenticate_host(
     _record_auth_attempt(host, success=True)
     logger.info("Password auth succeeded for %s", host)
     return {"status": "connected"}
+
+
+@router.get("/hosts/{host}/auth-info")
+async def host_auth_info(
+    host: str,
+    pool: ConnectionPool = Depends(get_pool),
+) -> dict:
+    """Whether the password prompt should show a username field.
+
+    True when the host has no User line in ~/.ssh/config — without a
+    username the daemon would connect as the local user and the correct
+    password would still fail.
+    """
+    return {"needs_username": pool.get_configured_user(host) is None}
 
 
 @router.post("/hosts/{host}/trust")

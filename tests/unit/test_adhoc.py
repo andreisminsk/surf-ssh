@@ -131,6 +131,51 @@ class TestPoolPasswordPath:
             await pool.get_connection("my-server")
             assert mock_connect.call_args.kwargs.get("password") is None
 
+    async def test_username_override_used_in_connect(self):
+        """Config hosts with no User line: the override must reach the
+        connect options — otherwise AsyncSSH falls back to the local
+        username and the correct password still fails."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.ssh.config_parser import SSHConfigParser
+        from src.ssh.connection_pool import ConnectionPool
+
+        import asyncssh
+        parser = MagicMock(spec=SSHConfigParser)
+        parser.get_host_config.return_value = {
+            "hostname": "example.com", "port": 22, "proxyjump": "", "user": "",
+        }
+        # Real options object — SSHClientConnectionOptions type-checks its input
+        parser.get_connect_options.return_value = asyncssh.SSHClientConnectionOptions(
+            host="example.com", port=22, username=(),
+        )
+        pool = ConnectionPool(config_parser=parser)
+        pool.set_username_override("wg-0", "andreismsq")
+        pool.set_password("wg-0", "secret")
+
+        with patch(
+            "src.ssh.connection_pool.asyncssh.connect", new_callable=AsyncMock
+        ) as mock_connect:
+            await pool.get_connection("wg-0")
+            opts = mock_connect.call_args.kwargs.get("options")
+            assert opts.username == "andreismsq"
+
+    async def test_get_configured_user(self):
+        from unittest.mock import MagicMock
+        from src.ssh.config_parser import SSHConfigParser
+        from src.ssh.connection_pool import ConnectionPool
+
+        parser = MagicMock(spec=SSHConfigParser)
+        parser.get_host_config.return_value = {
+            "hostname": "example.com", "port": 22, "user": "alice",
+        }
+        pool = ConnectionPool(config_parser=parser)
+        assert pool.get_configured_user("wb") == "alice"
+
+        parser.get_host_config.return_value = {
+            "hostname": "example.com", "port": 22, "user": "",
+        }
+        assert pool.get_configured_user("wg-0") is None
+
     async def test_auth_failure_negative_cache(self):
         """After key auth fails once, concurrent requests must fast-fail
         with PasswordRequiredError — no repeated SSH handshakes against

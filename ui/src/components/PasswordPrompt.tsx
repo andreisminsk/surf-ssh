@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 interface Props {
   host: string;
@@ -9,11 +9,21 @@ interface Props {
  *  or a host key needs TOFU confirmation. */
 export function PasswordPrompt({ host, onConnected }: Props) {
   const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('');
+  const [needsUsername, setNeedsUsername] = useState(false);
   const [error, setError] = useState('');
   const [locked, setLocked] = useState(0);
   const [busy, setBusy] = useState(false);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [keyChanged, setKeyChanged] = useState(false);
+
+  // Show a username field when the host has no User line in ~/.ssh/config
+  useEffect(() => {
+    fetch(`/api/v1/hosts/${encodeURIComponent(host)}/auth-info`, { credentials: 'include' })
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => { if (data) setNeedsUsername(!!data.needs_username); })
+      .catch(() => {});
+  }, [host]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -25,7 +35,10 @@ export function PasswordPrompt({ host, onConnected }: Props) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({
+          password,
+          ...(needsUsername && username.trim() ? { username: username.trim() } : {}),
+        }),
       });
       if (resp.ok) {
         onConnected();
@@ -119,6 +132,16 @@ export function PasswordPrompt({ host, onConnected }: Props) {
             <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
               This host requires a password:
             </p>
+            {needsUsername && (
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => { setUsername(e.target.value); setError(''); }}
+                style={{ ...inputStyle, fontSize: '1rem' }}
+                placeholder="Username"
+                autoComplete="username"
+              />
+            )}
             <input
               autoFocus
               type="password"
@@ -126,9 +149,13 @@ export function PasswordPrompt({ host, onConnected }: Props) {
               onChange={(e) => { setPassword(e.target.value); setError(''); }}
               style={{ ...inputStyle, fontSize: '1rem' }}
               placeholder="Password"
+              autoComplete="current-password"
             />
             {error && <p style={{ color: 'var(--error, #e06c75)', marginBottom: '0.75rem' }}>{error}</p>}
-            <button type="submit" disabled={busy || locked > 0 || !password} style={{
+            <button
+              type="submit"
+              disabled={busy || locked > 0 || !password || (needsUsername && !username.trim())}
+              style={{
               width: '100%',
               padding: '0.75rem',
               background: 'var(--accent, #89b4fa)',

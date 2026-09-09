@@ -137,6 +137,9 @@ class ConnectionPool:
         # Passwords are memory-only: never persisted, cleared on close_all.
         self._adhoc_registry = AdHocHostRegistry()
         self._passwords: dict[str, str] = {}
+        # Per-host username overrides (config hosts with no User line —
+        # the user supplies the account in the password prompt)
+        self._username_overrides: dict[str, str] = {}
         # Hosts where key auth already failed — concurrent requests
         # fast-fail instead of re-attempting (fail2ban / lockout risk)
         self._auth_failed_hosts: set[str] = set()
@@ -211,6 +214,15 @@ class ConnectionPool:
             # stored password alongside config options — AsyncSSH tries
             # keys first, then password. None = key-only (normal case).
             password = self._passwords.get(host)
+            # Username override (config hosts with no User line): the
+            # user supplied the account in the password prompt. Overrides
+            # the option's username — without it AsyncSSH falls back to
+            # the local username and the correct password still fails.
+            username_override = self._username_overrides.get(host)
+            if username_override:
+                options = asyncssh.SSHClientConnectionOptions(
+                    options=options, username=username_override
+                )
             try:
                 conn = await asyncssh.connect(
                     cfg["hostname"],
@@ -258,6 +270,18 @@ class ConnectionPool:
         """Store a host's password in memory (never persisted)."""
         self._passwords[host] = password
         self._auth_failed_hosts.discard(host)
+
+    def set_username_override(self, host: str, username: str) -> None:
+        """Store a per-host username override (config hosts with no User line)."""
+        self._username_overrides[host] = username
+
+    def get_configured_user(self, host: str) -> str | None:
+        """The User from ~/.ssh/config for this host, or None if unset."""
+        try:
+            cfg = self._config_parser.get_host_config(host)
+            return cfg.get("user") or None
+        except Exception:
+            return None
 
     def clear_password(self, host: str) -> None:
         """Drop a host's password (e.g. after repeated auth failures)."""
@@ -486,6 +510,7 @@ class ConnectionPool:
         self._passwords.clear()
         self._adhoc_registry.clear()
         self._auth_failed_hosts.clear()
+        self._username_overrides.clear()
         for host, conn in list(self._connections.items()):
             try:
                 conn.close()
