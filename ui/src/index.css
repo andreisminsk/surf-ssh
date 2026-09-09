@@ -127,6 +127,7 @@ body {
   cursor: pointer;
   user-select: none;
   font-size: 0.9rem;
+  line-height: 1.4;
 }
 
 .tree-node:hover {
@@ -146,6 +147,7 @@ body {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
+  height: 1.4em;  /* matches one line-height — keeps icon aligned with first line when text wraps */
 }
 
 .tree-icon svg {
