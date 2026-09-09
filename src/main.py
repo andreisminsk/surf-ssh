@@ -65,6 +65,31 @@ def open(
     from src.daemon.server import create_app
     from src.daemon.tls import ensure_tls_certificates
     from src.security.session_auth import SessionManager
+    from src.ssh.config_parser import SSHConfigParser
+
+    # Ad-hoc host: "user@host[:port]" or bare hostname not in ~/.ssh/config.
+    # Prompt for the password in the terminal (getpass), register the
+    # synthetic alias, and open the browser against it.
+    if "@" in host or not SSHConfigParser().list_hosts().count(host):
+        import getpass
+
+        spec = host
+        user_part, _, host_part = spec.partition("@")
+        hostname = user_part if not host_part else host_part
+        user = user_part if host_part else None
+        port = 22
+        if ":" in hostname:
+            hostname, _, port_s = hostname.rpartition(":")
+            if port_s.isdigit():
+                port = int(port_s)
+
+        console.print(f"[green]Starting surf-ssh daemon[/green] → {hostname} (ad-hoc, password auth)")
+        password = getpass.getpass(f"Password for {user or hostname}: ")
+
+        # Register on the app's pool once created
+        _adhoc_spec = (hostname, user, port, password)
+    else:
+        _adhoc_spec = None
 
     # Ensure config dir exists
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -116,6 +141,14 @@ def open(
     import uvicorn
 
     fastapi_app = create_app(session_mgr, auto_exit=not no_auto_exit)
+
+    if _adhoc_spec is not None:
+        hostname, user, port, password = _adhoc_spec
+        pool = fastapi_app.state.connection_pool
+        alias = pool.register_adhoc(hostname, user, port)
+        pool.set_password(alias, password)
+        host = alias  # browser opens against the synthetic alias
+        console.print(f"[dim]Ad-hoc alias: {alias}[/dim]")
     config = uvicorn.Config(
         fastapi_app,
         host="127.0.0.1",

@@ -7,11 +7,18 @@ import logging
 import socket
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import asyncssh
 
+from src.ssh.adhoc import AdHocHostRegistry
 from src.ssh.config_parser import SSHConfigParser
+from src.ssh.host_keys import HostKeyError, HostKeyTrust
+
+
+class PasswordRequiredError(ConnectionError):
+    """Ad-hoc host needs a password — the UI must prompt (taxonomy code)."""
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +109,7 @@ class ConnectionPool:
         idle_timeout: int = 600,
         max_sftp_channels: int = 5,
         max_terminals_per_host: int = 3,
+        config_dir: Path | None = None,
     ) -> None:
         self._config_parser = config_parser or SSHConfigParser()
         self._connections: dict[str, asyncssh.SSHClientConnection] = {}
@@ -125,6 +133,14 @@ class ConnectionPool:
         self._all_gone_since: float | None = None  # timestamp when all clients left
         self._ever_had_clients = False  # arms auto-exit only after first client
         self._shutdown_callback: Callable[[], None] | None = None
+        # Ad-hoc hosts (no ~/.ssh/config entry) + their passwords.
+        # Passwords are memory-only: never persisted, cleared on close_all.
+        self._adhoc_registry = AdHocHostRegistry()
+        self._passwords: dict[str, str] = {}
+        # Hosts where key auth already failed — concurrent requests
+        # fast-fail instead of re-attempting (fail2ban / lockout risk)
+        self._auth_failed_hosts: set[str] = set()
+        self._host_key_trust = HostKeyTrust(config_dir or Path.home() / ".surf-ssh")
 
     async def get_connection(self, host: str) -> asyncssh.SSHClientConnection:
         """Get or create an SSH connection for the given host alias."""
@@ -137,10 +153,48 @@ class ConnectionPool:
                 self._last_access[host] = time.monotonic()
                 return self._connections[host]
 
+            # Fast-fail: key auth already failed and no password on file.
+            # Page load fires several host-scoped calls concurrently (tree,
+            # home, status) — each must not re-attempt a full SSH handshake.
+            if host in self._auth_failed_hosts and self._passwords.get(host) is None:
+                raise PasswordRequiredError(host)
+
             # Evict if at capacity
             await self._evict_if_needed()
 
-            # Resolve host config to check for ProxyJump
+            # Ad-hoc host: connect from registry entry + memory-held password
+            adhoc = self._adhoc_registry.resolve(host)
+            if adhoc is not None:
+                logger.info("Opening SSH connection to %s (ad-hoc)", host)
+                connect_kwargs: dict[str, Any] = {
+                    "port": adhoc.port,
+                    "password": self._passwords.get(host),
+                    "known_hosts": self._host_key_trust.trusted_keys() or None,
+                    "keepalive_interval": 30,
+                }
+                if adhoc.user is not None:
+                    # username=None crashes AsyncSSH saslprep — omit entirely
+                    connect_kwargs["username"] = adhoc.user
+                try:
+                    conn = await asyncssh.connect(adhoc.hostname, **connect_kwargs)
+                except asyncssh.HostKeyNotVerifiable as e:
+                    raise self._host_key_trust.translate_connect_error(e) from e
+                except asyncssh.PermissionDenied as e:
+                    logger.error("SSH auth to %s failed: %s", host, e)
+                    if self._passwords.get(host) is None:
+                        # No password on file — the UI must prompt for one.
+                        # Remember so concurrent requests fast-fail.
+                        self._auth_failed_hosts.add(host)
+                        raise PasswordRequiredError(host) from e
+                    raise ConnectionError(f"Cannot connect to {host}: {e}") from e
+                except (asyncssh.Error, socket.gaierror, ConnectionError, OSError) as e:
+                    logger.error("SSH connection to %s failed: %s", host, e)
+                    raise ConnectionError(f"Cannot connect to {host}: {e}") from e
+                self._connections[host] = conn
+                self._last_access[host] = time.monotonic()
+                return conn
+
+            # Config alias: resolve config to check for ProxyJump
             cfg = self._config_parser.get_host_config(host)
             proxyjump = cfg.get("proxyjump", "")
 
@@ -153,6 +207,10 @@ class ConnectionPool:
             # Connect with explicit options (no config file parsing)
             logger.info("Opening SSH connection to %s", host)
             options = self._config_parser.get_connect_options(host)
+            # Password auth for config hosts (key auth failed): pass the
+            # stored password alongside config options — AsyncSSH tries
+            # keys first, then password. None = key-only (normal case).
+            password = self._passwords.get(host)
             try:
                 conn = await asyncssh.connect(
                     cfg["hostname"],
@@ -160,13 +218,57 @@ class ConnectionPool:
                     options=options,
                     tunnel=tunnel,
                     keepalive_interval=30,
+                    password=password,
                 )
+            except asyncssh.HostKeyNotVerifiable as e:
+                # Config hosts validate against ~/.ssh/known_hosts —
+                # surface unknown/changed keys via the same taxonomy
+                raise self._host_key_trust.translate_connect_error(e) from e
+            except asyncssh.PermissionDenied as e:
+                logger.error("SSH auth to %s failed: %s", host, e)
+                if self._passwords.get(host) is None:
+                    # Key auth failed and no password on file — prompt the
+                    # user (same as `ssh wb` would in a terminal). Remember
+                    # the failure so concurrent requests fast-fail.
+                    self._auth_failed_hosts.add(host)
+                    raise PasswordRequiredError(host) from e
+                raise ConnectionError(f"Cannot connect to {host}: {e}") from e
             except (asyncssh.Error, socket.gaierror, ConnectionError, OSError) as e:
                 logger.error("SSH connection to %s failed: %s", host, e)
                 raise ConnectionError(f"Cannot connect to {host}: {e}") from e
             self._connections[host] = conn
             self._last_access[host] = time.monotonic()
             return conn
+
+    # ── Ad-hoc hosts & passwords ───────────────────────────────────
+
+    def register_adhoc(self, hostname: str, user: str | None = None, port: int = 22) -> str:
+        """Register an ad-hoc host; returns its synthetic alias."""
+        return self._adhoc_registry.register(hostname, user, port)
+
+    def is_adhoc(self, host: str) -> bool:
+        """True if the alias refers to a registered ad-hoc host."""
+        return self._adhoc_registry.resolve(host) is not None
+
+    def list_adhoc_hosts(self) -> list[str]:
+        """All registered ad-hoc aliases."""
+        return self._adhoc_registry.list_hosts()
+
+    def set_password(self, host: str, password: str) -> None:
+        """Store a host's password in memory (never persisted)."""
+        self._passwords[host] = password
+        self._auth_failed_hosts.discard(host)
+
+    def clear_password(self, host: str) -> None:
+        """Drop a host's password (e.g. after repeated auth failures)."""
+        self._passwords.pop(host, None)
+
+    def trust_host_key(self, host: str, key_data: bytes) -> None:
+        """Trust a host's presented key (TOFU confirm from the UI)."""
+        adhoc = self._adhoc_registry.resolve(host)
+        if adhoc is None:
+            raise ValueError(f"Not an ad-hoc host: {host}")
+        self._host_key_trust.trust(adhoc.hostname, adhoc.port, key_data)
 
     def get_sftp_semaphore(self, host: str) -> asyncio.Semaphore:
         """Get the SFTP channel semaphore for a host."""
@@ -380,6 +482,10 @@ class ConnectionPool:
         await self.stop_reaper()
         self._client_registry.clear_all()
         self._last_client_left.clear()
+        # Zero password copies survive shutdown (hard invariant #3)
+        self._passwords.clear()
+        self._adhoc_registry.clear()
+        self._auth_failed_hosts.clear()
         for host, conn in list(self._connections.items()):
             try:
                 conn.close()

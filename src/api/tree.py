@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.models import TreeNode, TreeResponse
 from src.security.path_validator import PathValidationError, resolve_and_validate
-from src.ssh.connection_pool import ConnectionPool
+from src.ssh.connection_pool import ConnectionPool, PasswordRequiredError
+from src.ssh.host_keys import HostKeyError
 from src.ssh.sftp_client import SFTPClient
 
 router = APIRouter()
@@ -58,6 +59,14 @@ async def get_tree(
         validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except PasswordRequiredError:
+        raise HTTPException(status_code=401, detail="password_required") from None
+    except HostKeyError as e:
+        raise HTTPException(
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+        ) from e
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     try:
         return await _build_tree(host, validated, depth, limit, sftp)
@@ -67,6 +76,12 @@ async def get_tree(
         if "Permission denied" in str(e):
             raise HTTPException(status_code=403, detail="Permission denied") from e
         raise HTTPException(status_code=503, detail="Connection error") from e
+    except PasswordRequiredError:
+        raise HTTPException(status_code=401, detail="password_required") from None
+    except HostKeyError as e:
+        raise HTTPException(
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+        ) from e
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 

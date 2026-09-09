@@ -147,11 +147,14 @@ class SSHConfigParser:
         # original ~/.ssh/config (which has inline comments it can't parse).
         # Our explicit options below override anything in the config file.
         config_path = str(self._sanitize_config()) if self._config_path.exists() else ()
+        # known_hosts: NOT overridden — AsyncSSH validates against the
+        # user's real ~/.ssh/known_hosts (loaded via the sanitized config).
+        # Previously known_hosts=None disabled validation entirely (MITM
+        # hole); see dev-docs/PASSWORD-AUTH-ARCH.md §8.
         return asyncssh.SSHClientConnectionOptions(
             config=config_path,
             host=cfg["hostname"],
             port=cfg["port"],
             username=cfg["user"] or (),
             client_keys=cfg["identityfile"] or (),
-            known_hosts=None,
         )

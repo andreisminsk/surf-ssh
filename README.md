@@ -14,6 +14,7 @@ A local-first developer tool that provides a browser-based file system explorer 
 - **Security** — Local-only binding, session token → HttpOnly cookie, path traversal prevention, SSRF mitigation via CSP
 - **2FA (daemon mode)** — Optional TOTP challenge for direct browser access; CLI path (`surf-ssh url`) unchanged
 - **Zero config** — Reuses `~/.ssh/config` host aliases and keys
+- **Ad-hoc hosts** — Connect to hosts without `~/.ssh/config` entries via password auth (browser prompt or CLI `user@host`); passwords are held in daemon memory only, never written to disk
 - **Cross-platform** — Works on macOS and Windows
 
 ## Quick Start
@@ -118,6 +119,7 @@ surf-ssh/
 - **Docs off by default**: OpenAPI/Swagger UI disabled unless `SURF_SSH_DEV=1`
 - **Update check**: At most one outbound GitHub request per 24h; disable with `--no-update-check`
 - **2FA (daemon mode)**: `surf-ssh setup-2fa` enables a TOTP challenge for direct browser access (`https://localhost:8443` → 6-digit code → session). Rate-limited (5 attempts/min, exponential lockout). Recovery: backup codes or `surf-ssh disable-2fa`. See [dev-docs/2FA-ARCH.md](dev-docs/2FA-ARCH.md)
+- **Ad-hoc password auth**: Hosts without config entries connect via password (browser prompt or `surf-ssh open user@host`). Passwords live in daemon memory only — never on disk, never in logs. Host keys use TOFU with explicit fingerprint confirmation, stored in `~/.surf-ssh/known_hosts` (not your `~/.ssh`). Auth attempts are rate-limited per host (5/min). See [dev-docs/PASSWORD-AUTH-ARCH.md](dev-docs/PASSWORD-AUTH-ARCH.md)
 
 ## Daemon Mode
 

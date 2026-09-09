@@ -19,7 +19,8 @@ from fastapi.responses import StreamingResponse, Response
 
 from src.api.models import FileStat
 from src.security.path_validator import PathValidationError, resolve_and_validate
-from src.ssh.connection_pool import ConnectionPool
+from src.ssh.connection_pool import ConnectionPool, PasswordRequiredError
+from src.ssh.host_keys import HostKeyError
 from src.ssh.sftp_client import SFTPClient
 
 router = APIRouter()
@@ -48,6 +49,14 @@ async def get_file(
         validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except PasswordRequiredError:
+        raise HTTPException(status_code=401, detail="password_required") from None
+    except HostKeyError as e:
+        raise HTTPException(
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+        ) from e
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     try:
         # Determine content type
@@ -96,6 +105,12 @@ async def get_file(
             media_type=content_type,
             headers={"Cache-Control": "private, max-age=300"},
         )
+    except PasswordRequiredError:
+        raise HTTPException(status_code=401, detail="password_required") from None
+    except HostKeyError as e:
+        raise HTTPException(
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+        ) from e
     except asyncssh.Error as e:
         if "No such file" in str(e):
             raise HTTPException(status_code=404, detail="File not found") from e
@@ -115,6 +130,14 @@ async def get_stat(
         validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except PasswordRequiredError:
+        raise HTTPException(status_code=401, detail="password_required") from None
+    except HostKeyError as e:
+        raise HTTPException(
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+        ) from e
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     try:
         stat_info = await sftp.stat(host, validated)
@@ -153,6 +176,14 @@ async def download_file(
         validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except PasswordRequiredError:
+        raise HTTPException(status_code=401, detail="password_required") from None
+    except HostKeyError as e:
+        raise HTTPException(
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+        ) from e
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
     try:
         stat_info = await sftp.stat(host, validated)

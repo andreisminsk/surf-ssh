@@ -47,14 +47,29 @@ export interface FileStat {
   mode?: string;
 }
 
+// Global hook for auth-flow errors (password_required, host key, etc.)
+// Registered by App — keeps the taxonomy routing in one place.
+export let onAuthFlowError: ((host: string, detail: string) => void) | null = null;
+export function setAuthFlowErrorHandler(h: ((host: string, detail: string) => void) | null) {
+  onAuthFlowError = h;
+}
+
 async function apiFetch(path: string): Promise<Response> {
   const resp = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
     headers: { 'X-Client-ID': getClientId() },
   });
   if (!resp.ok) {
-    const detail = await resp.json().catch(() => ({ detail: resp.statusText }));
-    throw new Error(detail.detail || `HTTP ${resp.status}`);
+    const data = await resp.json().catch(() => ({ detail: resp.statusText }));
+    // Route auth-flow taxonomy codes to the App-level handler
+    const detail = data.detail || `HTTP ${resp.status}`;
+    if (onAuthFlowError && typeof detail === 'string') {
+      const hostMatch = path.match(/^\/hosts\/([^/]+)\//);
+      if (hostMatch && ['password_required', 'invalid_password', 'host_key_unknown', 'host_key_changed'].includes(detail)) {
+        onAuthFlowError(decodeURIComponent(hostMatch[1]), detail);
+      }
+    }
+    throw new Error(detail || `HTTP ${resp.status}`);
   }
   return resp;
 }

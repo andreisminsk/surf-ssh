@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
 import { TerminalView } from './components/TerminalView';
@@ -8,11 +8,12 @@ import {
   FileTextIcon, MonitorIcon, TerminalIcon, CloseIcon,
   PlusIcon, ChevronDownIcon,
 } from './components/icons';
+import { PasswordPrompt } from './components/PasswordPrompt';
 import { TotpChallenge } from './components/TotpChallenge';
 import { useConnection } from './hooks/useConnection';
 import { useFileSystem } from './hooks/useFileSystem';
 import { useLiveness } from './hooks/useLiveness';
-import { api, HostInfo } from './api/client';
+import { api, HostInfo, setAuthFlowErrorHandler } from './api/client';
 
 interface Tab {
   id: string;
@@ -41,16 +42,88 @@ function tabIcon(tab: Tab) {
   return <MonitorIcon color="var(--yellow)" size={14} />;
 }
 
+function AddHostForm({ onAdded }: { onAdded: (alias: string) => void }) {
+  const [hostname, setHostname] = useState('');
+  const [user, setUser] = useState('');
+  const [port, setPort] = useState('22');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (busy || !hostname.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const resp = await fetch('/api/v1/hosts/adhoc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          hostname: hostname.trim(),
+          user: user.trim() || null,
+          port: parseInt(port, 10) || 22,
+        }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({ detail: resp.statusText }));
+        throw new Error(data.detail || `HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      onAdded(data.alias);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const inputStyle: React.CSSProperties = {
+    padding: '0.5rem',
+    background: 'var(--bg-secondary, #1e1e2e)',
+    border: '1px solid var(--border, #333346)',
+    borderRadius: '6px',
+    color: 'var(--text, #cdd6f4)',
+    width: '100%',
+  };
+
+  return (
+    <form onSubmit={submit} style={{ marginTop: '1.5rem', textAlign: 'left' }}>
+      <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '0.5rem' }}>
+        Add a host without ~/.ssh/config (password auth):
+      </div>
+      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
+        <input style={inputStyle} placeholder="user (optional)" value={user} onChange={e => setUser(e.target.value)} />
+        <input style={inputStyle} placeholder="hostname" value={hostname} onChange={e => setHostname(e.target.value)} required />
+        <input style={{ ...inputStyle, width: 80 }} placeholder="port" value={port} onChange={e => setPort(e.target.value.replace(/\D/g, ''))} />
+      </div>
+      {error && <div style={{ color: 'var(--error, #e06c75)', fontSize: '0.85rem', marginBottom: '0.5rem' }}>{error}</div>}
+      <button type="submit" disabled={busy || !hostname.trim()} style={{
+        padding: '0.5rem 1rem',
+        background: 'var(--accent, #89b4fa)',
+        border: 'none',
+        borderRadius: '6px',
+        color: '#1e1e2e',
+        cursor: busy ? 'wait' : 'pointer',
+        width: '100%',
+      }}>
+        {busy ? 'Adding…' : 'Add host'}
+      </button>
+    </form>
+  );
+}
+
 function HostPicker({ onPick }: { onPick: (host: string) => void }) {
   const [hosts, setHosts] = useState<HostInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showAdd, setShowAdd] = useState(false);
 
   useEffect(() => {
     api.listHosts()
       .then(data => { setHosts(data.hosts); setLoading(false); })
       .catch(e => {
-          setError(
+        setError(
           e.message.includes('Unauthorized')
             ? 'Unauthorized — run surf-ssh url to connect.'
             : e.message
@@ -101,6 +174,25 @@ function HostPicker({ onPick }: { onPick: (host: string) => void }) {
             ))}
           </div>
         )}
+        <div style={{ marginTop: '1rem' }}>
+          <button onClick={() => setShowAdd(s => !s)} style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-secondary)',
+            cursor: 'pointer',
+            fontSize: '0.85rem',
+            textDecoration: 'underline',
+          }}>
+            {showAdd ? 'Cancel' : '+ Add host without config…'}
+          </button>
+          {showAdd && (
+            <AddHostForm onAdded={(alias) => {
+              const params = new URLSearchParams(window.location.search);
+              params.set('host', alias);
+              window.location.search = params.toString();
+            }} />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -128,12 +220,24 @@ function App() {
   const urlPath = params.get('path') || '';
   const [unauthorized, setUnauthorized] = useState(false);
   const [totpEnabled, setTotpEnabled] = useState<boolean | null>(null);
+  const [passwordHost, setPasswordHost] = useState<string | null>(null);
 
   // Check whether 2FA is available on this daemon (drives the 401 screen)
   useEffect(() => {
     fetch('/api/v1/auth/verify-totp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       .then(r => setTotpEnabled(r.status !== 404))
       .catch(() => setTotpEnabled(false));
+  }, []);
+
+  // Route auth-flow taxonomy codes (password_required, host key) from any
+  // host-scoped API call to the PasswordPrompt view
+  useEffect(() => {
+    setAuthFlowErrorHandler((host, detail) => {
+      if (detail === 'password_required' || detail === 'invalid_password') {
+        setPasswordHost(host);
+      }
+    });
+    return () => setAuthFlowErrorHandler(null);
   }, []);
 
   // Daemon mode (no ?host= param): the host-scoped 401 probes below
@@ -150,7 +254,7 @@ function App() {
   const [homePath, setHomePath] = useState(urlPath || '/');
 
   const { status } = useConnection(host);
-  const { tree, loading, selectedFile, error, loadChildren, selectFile, refreshAll } = useFileSystem(host);
+  const { tree, loading, selectedFile, error, clearError, loadChildren, selectFile, refreshAll } = useFileSystem(host);
   useLiveness(host);
   const [platform, setPlatform] = useState('unix');
   const [sidebarWidth, setSidebarWidth] = useState(300);
@@ -176,21 +280,26 @@ function App() {
   }, [host]);
 
   // Fetch home directory and platform
+  const fetchHome = useCallback(() => {
+    if (!host) return;
+    fetch(`/api/v1/hosts/${host}/home`, { credentials: 'include' })
+      .then(r => {
+        if (r.status === 401) setUnauthorized(true);
+        return r.ok ? r.json() : null;
+      })
+      .then(data => {
+        if (data?.home) {
+          setRootPath(data.home);
+          setHomePath(data.home);
+        }
+      })
+      .catch(() => {});
+  }, [host]);
+
   useEffect(() => {
     if (!host) return;
     if (!urlPath) {
-      fetch(`/api/v1/hosts/${host}/home`, { credentials: 'include' })
-        .then(r => {
-          if (r.status === 401) setUnauthorized(true);
-          return r.ok ? r.json() : null;
-        })
-        .then(data => {
-          if (data?.home) {
-            setRootPath(data.home);
-            setHomePath(data.home);
-          }
-        })
-        .catch(() => {});
+      fetchHome();
     }
     fetch(`/api/v1/hosts/${host}/status`, { credentials: 'include' })
       .then(r => {
@@ -201,7 +310,7 @@ function App() {
         if (data?.platform) setPlatform(data.platform);
       })
       .catch(() => {});
-  }, [host, urlPath]);
+  }, [host, urlPath, fetchHome]);
 
   useEffect(() => {
     if (host && rootPath) {
@@ -286,6 +395,21 @@ function App() {
       return <TotpChallenge onAuthenticated={() => { setUnauthorized(false); refreshAll([]); }} />;
     }
     return <UnauthorizedScreen />;
+  }
+
+  if (passwordHost) {
+    return (
+      <PasswordPrompt
+        host={passwordHost}
+        onConnected={() => {
+          setPasswordHost(null);
+          clearError();
+          // Re-fetch home (failed during the prompt) and reload the tree.
+          // fetchHome sets rootPath, which retriggers the tree load effect.
+          fetchHome();
+        }}
+      />
+    );
   }
 
   if (!host) {

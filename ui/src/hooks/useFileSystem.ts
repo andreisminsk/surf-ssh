@@ -59,6 +59,8 @@ export function useFileSystem(host: string) {
     }
   }, [host]);
 
+  const clearError = useCallback(() => setError(null), []);
+
   const refreshAll = useCallback(async (paths: string[]) => {
     // Clear cache for all given paths
     for (const p of paths) {
@@ -88,5 +90,5 @@ export function useFileSystem(host: string) {
     }
   }, [host]);
 
-  return { tree, loading, selectedFile, error, loadChildren, selectFile, setSelectedFile, refreshTree, refreshAll };
+  return { tree, loading, selectedFile, error, clearError, loadChildren, selectFile, setSelectedFile, refreshTree, refreshAll };
 }
