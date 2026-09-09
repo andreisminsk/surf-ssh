@@ -1,5 +1,6 @@
 """Unit tests for session_auth.py."""
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -29,10 +30,24 @@ class TestCreateSession:
 
     def test_persists_session_file(self, session_manager):
         token = session_manager.create_session()
-        session_file = session_manager._sessions_dir / f"{token}.json"
+        session_file = session_manager._session_path(token)
         assert session_file.exists()
         data = json.loads(session_file.read_text())
-        assert data["token"] == token
+        assert "created" in data
+
+    def test_filename_does_not_leak_token(self, session_manager):
+        token = session_manager.create_session()
+        session_file = session_manager._session_path(token)
+        assert token not in session_file.name
+        # No file in the directory contains the raw token in its name
+        for f in session_manager._sessions_dir.iterdir():
+            assert token not in f.name
+
+    def test_session_file_is_owner_only(self, session_manager):
+        token = session_manager.create_session()
+        session_file = session_manager._session_path(token)
+        mode = session_file.stat().st_mode & 0o777
+        assert mode == 0o600
 
     def test_token_is_url_safe(self, session_manager):
         token = session_manager.create_session()
@@ -73,7 +88,7 @@ class TestDestroySession:
 
     def test_removes_session_file(self, session_manager):
         token = session_manager.create_session()
-        session_file = session_manager._sessions_dir / f"{token}.json"
+        session_file = session_manager._session_path(token)
         assert session_file.exists()
         session_manager.destroy_session(token)
         assert not session_file.exists()
@@ -102,3 +117,43 @@ class TestMultipleSessions:
         assert session_manager.validate_session(tokens[0]) is True
         assert session_manager.validate_session(tokens[1]) is False
         assert session_manager.validate_session(tokens[2]) is True
+
+
+class TestSessionExpiry:
+    """Tests for TTL enforcement and startup purge."""
+
+    def test_expired_session_rejected(self, tmp_path):
+        mgr = SessionManager(tmp_path / "sessions", ttl=10.0)
+        token = mgr.create_session()
+        # Forge an expired timestamp
+        session_file = mgr._session_path(token)
+        data = json.loads(session_file.read_text())
+        data["created"] = time.time() - 100.0
+        session_file.write_text(json.dumps(data))
+        assert mgr.validate_session(token) is False
+        # Expired session is also removed from disk
+        assert not session_file.exists()
+
+    def test_valid_session_within_ttl(self, tmp_path):
+        mgr = SessionManager(tmp_path / "sessions", ttl=3600.0)
+        token = mgr.create_session()
+        assert mgr.validate_session(token) is True
+
+    def test_startup_purges_expired_files(self, tmp_path):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(parents=True)
+        # An expired hashed session file
+        expired = sessions_dir / (hashlib.sha256(b"old").hexdigest() + ".json")
+        expired.write_text(json.dumps({"created": time.time() - 999999}))
+        # A legacy plaintext-named file
+        legacy = sessions_dir / "some-old-plaintext-token.json"
+        legacy.write_text(json.dumps({"token": "some-old-plaintext-token", "created": time.time()}))
+        # A fresh valid file
+        fresh = sessions_dir / (hashlib.sha256(b"fresh").hexdigest() + ".json")
+        fresh.write_text(json.dumps({"created": time.time()}))
+
+        SessionManager(sessions_dir, ttl=3600.0)
+
+        assert not expired.exists()
+        assert not legacy.exists()
+        assert fresh.exists()

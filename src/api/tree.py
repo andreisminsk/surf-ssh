@@ -9,7 +9,7 @@ import asyncssh
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.models import TreeNode, TreeResponse
-from src.security.path_validator import PathValidationError, validate_path
+from src.security.path_validator import PathValidationError, resolve_and_validate
 from src.ssh.connection_pool import ConnectionPool
 from src.ssh.sftp_client import SFTPClient
 
@@ -55,7 +55,7 @@ async def get_tree(
 ) -> TreeResponse:
     """Get a depth-limited, entry-capped directory tree."""
     try:
-        validated = validate_path(path)
+        validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

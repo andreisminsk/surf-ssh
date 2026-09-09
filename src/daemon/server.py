@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,11 +62,9 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
             token = request.cookies.get("surf_ssh_session")
             if not token or not session_mgr.validate_session(token):
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-            # Also check WebSocket query param for terminal connections
-            if path.startswith("/api/v1/hosts/") and path.endswith("/terminal"):
-                token = request.query_params.get("token", token)
-                if not session_mgr.validate_session(token):
-                    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            # NOTE: WebSocket endpoints are NOT covered by this middleware —
+            # BaseHTTPMiddleware only sees HTTP scopes. Each WS endpoint calls
+            # require_ws_auth() before accept() (see src/api/ws_auth.py).
 
             # Touch client liveness on host-scoped HTTP requests.
             # Extract host from paths like /api/v1/hosts/{host}/...
@@ -76,10 +75,13 @@ class SessionAuthMiddleware(BaseHTTPMiddleware):
                 if len(parts) >= 5:
                     host = parts[4]
                     pool: ConnectionPool = request.app.state.connection_pool
-                    pool.touch_client(host, f"http:{token}")
+                    # Per-tab client ID from the SPA; falls back to the token
+                    # (all tabs of one session collapse to a single client).
+                    client_id = request.headers.get("X-Client-ID") or f"http:{token}"
+                    pool.touch_client(host, client_id)
                     # Auto-register if not already (HTTP-only browsing)
                     if pool.get_live_client_count(host) == 0:
-                        pool.register_client(host, f"http:{token}", "http")
+                        pool.register_client(host, client_id, "http")
 
         return await call_next(request)
 
@@ -92,11 +94,14 @@ def create_app(session_manager: SessionManager, auto_exit: bool = True) -> FastA
         auto_exit: If True, the daemon shuts down when no browser clients
             remain connected for a grace period.
     """
+    # OpenAPI docs are a ready-made attack-surface map — disabled unless
+    # SURF_SSH_DEV=1 is set for local development.
+    dev_docs = os.environ.get("SURF_SSH_DEV") == "1"
     app = FastAPI(
         title="Surf SSH",
         version="0.1.0",
-        docs_url="/api/v1/docs",
-        openapi_url="/api/v1/openapi.json",
+        docs_url="/api/v1/docs" if dev_docs else None,
+        openapi_url="/api/v1/openapi.json" if dev_docs else None,
     )
 
     # CORS — local only

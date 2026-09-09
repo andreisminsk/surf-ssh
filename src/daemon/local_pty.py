@@ -7,6 +7,7 @@ import logging
 import os
 import platform
 import shutil
+import signal
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -248,8 +249,6 @@ class LocalPtyManager:
             return
         self._closed = True
 
-        # Close the PTY FIRST — this unblocks the blocking read in the
-        # executor thread, allowing the read task to finish.
         if self._pty:
             system = platform.system()
             if system == "Windows":
@@ -258,14 +257,18 @@ class LocalPtyManager:
                 except Exception:
                     pass
             else:
+                pid = self._pty["pid"]
+                master_fd = self._pty["master_fd"]
+                # Kill the child process group BEFORE closing the master fd.
+                # On macOS, close() on a PTY master blocks uninterruptibly
+                # (U state) while any process still holds the slave side —
+                # closing first deadlocks the event loop forever. The child
+                # is a session leader (setsid), so killpg reaches its whole
+                # process group (editors, pipelines, sleep, ...).
+                await self._terminate_pgrp(pid)
                 try:
-                    os.close(self._pty["master_fd"])
-                except Exception:
-                    pass
-                # Kill child if still running
-                try:
-                    os.kill(self._pty["pid"], signal.SIGTERM)
-                except Exception:
+                    os.close(master_fd)
+                except OSError:
                     pass
 
         # Now cancel the read task — it should unblock once the PTY is closed
@@ -277,6 +280,55 @@ class LocalPtyManager:
                 pass
 
         self._pty = None
+
+    async def _terminate_pgrp(self, pid: int) -> None:
+        """Terminate the PTY child's process group: SIGTERM, wait, SIGKILL."""
+        # The child calls setsid() immediately after fork(); if close()
+        # races ahead of that, the process group doesn't exist yet and
+        # killpg() fails. Retry briefly before giving up on the group.
+        sent_term = False
+        for _ in range(20):  # ~1s max
+            try:
+                os.killpg(pid, signal.SIGTERM)
+                sent_term = True
+                break
+            except ProcessLookupError:
+                try:
+                    os.kill(pid, 0)  # child alive but not yet session leader?
+                except ProcessLookupError:
+                    return  # child fully gone — nothing to terminate
+                await asyncio.sleep(0.05)
+            except PermissionError:
+                return  # not our process — leave it alone
+        if not sent_term:
+            # Group never appeared (child died pre-setsid or is stuck):
+            # fall back to signaling the leader directly.
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        # Wait up to ~1s for a graceful exit
+        for _ in range(20):
+            try:
+                dead, _status = os.waitpid(pid, os.WNOHANG)
+                if dead:
+                    break
+            except ChildProcessError:
+                break
+            await asyncio.sleep(0.05)
+        # Force-kill any survivors (the group persists until its last
+        # member exits, even after the leader is reaped).
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        # Reap the leader deterministically. SIGKILL guarantees the child
+        # exits, so a blocking wait returns near-instantly; WNOHANG here
+        # would race with the child's actual death and leave a zombie.
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass  # already reaped by the read loop
 
 
 class LocalPtyRegistry:

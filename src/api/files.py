@@ -18,11 +18,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, Response
 
 from src.api.models import FileStat
-from src.security.path_validator import PathValidationError, validate_path
+from src.security.path_validator import PathValidationError, resolve_and_validate
 from src.ssh.connection_pool import ConnectionPool
 from src.ssh.sftp_client import SFTPClient
 
 router = APIRouter()
+
+# Hard cap on streamed/downloaded file size (2 GiB) — protects the local
+# daemon and the SFTP channel from unbounded transfers (disk images etc.)
+MAX_TRANSFER_SIZE = 2 * 1024 * 1024 * 1024
 
 
 def get_pool() -> ConnectionPool:
@@ -41,7 +45,7 @@ async def get_file(
 ) -> StreamingResponse:
     """Stream file content from the remote host."""
     try:
-        validated = validate_path(path)
+        validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -64,6 +68,12 @@ async def get_file(
             raise HTTPException(status_code=400, detail="Path is a directory, not a file")
 
         file_size = stat_info.size or 0
+
+        if file_size > MAX_TRANSFER_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large to view ({file_size} bytes, limit {MAX_TRANSFER_SIZE})",
+            )
 
         # For images and files < 50MB, read into memory for reliable delivery
         # (StreamingResponse can stall over ProxyJump tunnels)
@@ -102,7 +112,7 @@ async def get_stat(
 ) -> FileStat:
     """Get file metadata from the remote host."""
     try:
-        validated = validate_path(path)
+        validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -140,11 +150,18 @@ async def download_file(
 ) -> StreamingResponse:
     """Download a binary file with Content-Disposition attachment header."""
     try:
-        validated = validate_path(path)
+        validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     try:
+        stat_info = await sftp.stat(host, validated)
+        file_size = stat_info.size or 0
+        if file_size > MAX_TRANSFER_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large to download ({file_size} bytes, limit {MAX_TRANSFER_SIZE})",
+            )
         filename = PurePosixPath(validated).name
         return StreamingResponse(
             sftp.open_read(host, validated),

@@ -48,7 +48,14 @@ function HostPicker({ onPick }: { onPick: (host: string) => void }) {
   useEffect(() => {
     api.listHosts()
       .then(data => { setHosts(data.hosts); setLoading(false); })
-      .catch(e => { setError(e.message); setLoading(false); });
+      .catch(e => {
+        setError(
+          e.message.includes('Unauthorized')
+            ? 'Unauthorized — restart surf-ssh and open the authenticated URL it prints.'
+            : e.message
+        );
+        setLoading(false);
+      });
   }, []);
 
   return (
@@ -98,10 +105,28 @@ function HostPicker({ onPick }: { onPick: (host: string) => void }) {
   );
 }
 
+function UnauthorizedScreen() {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
+      <div style={{ textAlign: 'center', maxWidth: 500, width: '90%' }}>
+        <h1>🔒 Unauthorized</h1>
+        <p style={{ color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+          This browser has no valid surf-ssh session.
+        </p>
+        <p style={{ color: 'var(--text-secondary)' }}>
+          Restart <code>surf-ssh</code> and open the authenticated URL it prints
+          (it looks like <code>https://localhost:8443/api/v1/auth/exchange?token=…</code>).
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const params = new URLSearchParams(window.location.search);
   const host = params.get('host') || '';
   const urlPath = params.get('path') || '';
+  const [unauthorized, setUnauthorized] = useState(false);
   const [rootPath, setRootPath] = useState(urlPath || '/');
   const [homePath, setHomePath] = useState(urlPath || '/');
 
@@ -136,7 +161,10 @@ function App() {
     if (!host) return;
     if (!urlPath) {
       fetch(`/api/v1/hosts/${host}/home`, { credentials: 'include' })
-        .then(r => r.ok ? r.json() : null)
+        .then(r => {
+          if (r.status === 401) setUnauthorized(true);
+          return r.ok ? r.json() : null;
+        })
         .then(data => {
           if (data?.home) {
             setRootPath(data.home);
@@ -146,7 +174,10 @@ function App() {
         .catch(() => {});
     }
     fetch(`/api/v1/hosts/${host}/status`, { credentials: 'include' })
-      .then(r => r.ok ? r.json() : null)
+      .then(r => {
+        if (r.status === 401) setUnauthorized(true);
+        return r.ok ? r.json() : null;
+      })
       .then(data => {
         if (data?.platform) setPlatform(data.platform);
       })
@@ -229,6 +260,10 @@ function App() {
     setTabs([...tabs, { id, type: 'local' }]);
     activateTab(id);
     setNewMenuOpen(false);
+  }
+
+  if (unauthorized) {
+    return <UnauthorizedScreen />;
   }
 
   if (!host) {

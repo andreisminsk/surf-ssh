@@ -4,9 +4,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from src.daemon.server import create_app
+from src.daemon.static import serve_spa_asset
 from src.security.session_auth import SessionManager
 
 
@@ -134,3 +137,85 @@ class TestTreeEndpoint:
         # limit > MAX_LIMIT (5000) should be rejected
         resp = auth_client.get("/api/v1/hosts/test-host/tree?path=/&limit=99999")
         assert resp.status_code == 422
+
+
+class TestWsAuth:
+    """WebSocket endpoints must reject unauthenticated handshakes.
+
+    BaseHTTPMiddleware never sees WS scopes, so each WS endpoint calls
+    require_ws_auth() before accept(). A rejected handshake raises
+    WebSocketDisconnect in the TestClient.
+    """
+
+    def test_liveness_ws_requires_auth(self, client):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/api/v1/liveness?host=test"):
+                pass
+
+    def test_local_terminal_ws_requires_auth(self, client):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/api/v1/local/terminal?shell=default"):
+                pass
+
+    def test_remote_terminal_ws_requires_auth(self, client):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/api/v1/hosts/test-host/terminal"):
+                pass
+
+    def test_liveness_ws_rejects_bad_token_query_param(self, client):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/api/v1/liveness?host=test&token=bogus"):
+                pass
+
+    def test_liveness_ws_accepts_valid_cookie(self, auth_client):
+        with auth_client.websocket_connect("/api/v1/liveness?host=test") as ws:
+            assert ws.receive_json() == {"type": "ready"}
+
+
+class TestOpenApiDocsDisabled:
+    """OpenAPI docs must not be exposed unless SURF_SSH_DEV=1."""
+
+    def test_docs_404_by_default(self, auth_client):
+        # Route removed entirely — 404 even when authenticated
+        assert auth_client.get("/api/v1/docs").status_code == 404
+        assert auth_client.get("/api/v1/openapi.json").status_code == 404
+
+    def test_docs_unauthenticated_gets_401(self, client):
+        # Unknown /api/v1/* paths are intercepted by the auth middleware
+        assert client.get("/api/v1/docs").status_code == 401
+
+
+class TestStaticTraversal:
+    """The /ui/{path} handler must contain all paths inside ui/dist."""
+
+    @pytest.mark.asyncio
+    async def test_encoded_traversal_rejected(self):
+        # "..%2f..%2f" arrives URL-decoded as "../../"
+        with pytest.raises(HTTPException) as exc:
+            await serve_spa_asset("../../README.md")
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_absolute_path_injection_rejected(self):
+        # Path("/x") / "/etc/passwd" → "/etc/passwd" — must be caught
+        with pytest.raises(HTTPException) as exc:
+            await serve_spa_asset("/etc/passwd")
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_deep_traversal_rejected(self):
+        with pytest.raises(HTTPException) as exc:
+            await serve_spa_asset("assets/../../../../../../../etc/passwd")
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_legit_asset_still_served(self):
+        # ui/dist/index.html exists in the repo — should be served
+        resp = await serve_spa_asset("index.html")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_spa_fallback_still_works(self):
+        # Unknown client-side route falls back to index.html, not 404
+        resp = await serve_spa_asset("some/client/route")
+        assert resp.status_code == 200

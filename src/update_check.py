@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 import urllib.request
 from pathlib import Path
 
@@ -10,6 +12,27 @@ GITHUB_RAW_URL = (
     "https://raw.githubusercontent.com/andreisminsk/surf-ssh/main/surf-ssh-ver.txt"
 )
 DEFAULT_TIMEOUT = 3.0  # seconds — keep startup snappy even on poor networks
+CHECK_INTERVAL = 24 * 3600  # at most one outbound check per 24h
+
+
+def _cache_path() -> Path:
+    return Path.home() / ".surf-ssh" / "config.json"
+
+
+def _load_cache() -> dict:
+    try:
+        return json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_cache(cache: dict) -> None:
+    path = _cache_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _local_version() -> str | None:
@@ -48,13 +71,21 @@ def _remote_version(timeout: float = DEFAULT_TIMEOUT) -> str | None:
         return None
 
 
-def check_update(timeout: float = DEFAULT_TIMEOUT) -> tuple[str, str] | None:
+def check_update(
+    timeout: float = DEFAULT_TIMEOUT, force: bool = False
+) -> tuple[str, str] | None:
     """Return (local, remote) if a newer version exists on GitHub, else None.
 
-    Never raises — network failures are silently ignored.
+    Never raises — network failures are silently ignored. At most one
+    outbound request per CHECK_INTERVAL (24h), unless force=True.
     """
+    cache = _load_cache()
+    now = time.time()
+    if not force and now - cache.get("last_update_check", 0) < CHECK_INTERVAL:
+        return None
     local = _local_version()
     remote = _remote_version(timeout)
+    _save_cache({**cache, "last_update_check": now})
     if local is None or remote is None:
         return None
     if _parse(remote) > _parse(local):

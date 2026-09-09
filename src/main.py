@@ -28,6 +28,21 @@ DEFAULT_PORT = 8443
 CONFIG_DIR = Path.home() / ".surf-ssh"
 
 
+def _force_exit_watchdog(delay: float) -> None:
+    """Force-exit the process after `delay` seconds, from a real thread.
+
+    A loop.call_later watchdog never fires if the event loop is blocked
+    in an uninterruptible syscall (e.g. a PTY close hanging in U state
+    on macOS) — a daemon thread always fires.
+    """
+    import os
+    import threading
+
+    timer = threading.Timer(delay, os._exit, (0,))
+    timer.daemon = True
+    timer.start()
+
+
 @app.command()
 def open(
     host: str = typer.Argument(..., help="SSH host alias from ~/.ssh/config"),
@@ -36,6 +51,10 @@ def open(
     no_auto_exit: bool = typer.Option(
         False, "--no-auto-exit",
         help="Keep daemon running even when no browser clients are connected",
+    ),
+    no_update_check: bool = typer.Option(
+        False, "--no-update-check",
+        help="Skip the outbound update check to GitHub",
     ),
 ) -> None:
     """Open a browser-based file explorer for a remote SSH host."""
@@ -59,7 +78,8 @@ def open(
     cert_path, key_path = ensure_tls_certificates(CONFIG_DIR)
 
     # Non-blocking update check — prints a warning if GitHub has a newer version.
-    # Runs in a daemon thread so it never delays daemon startup.
+    # Runs in a daemon thread so it never delays daemon startup. Skipped with
+    # --no-update-check or when a check has run within the last 24h (cached).
     def _check_update() -> None:
         try:
             from src.update_check import check_update
@@ -74,7 +94,8 @@ def open(
                 f"(git pull and re-install to upgrade)[/yellow]"
             )
 
-    threading.Thread(target=_check_update, daemon=True).start()
+    if not no_update_check:
+        threading.Thread(target=_check_update, daemon=True).start()
 
     # Find available port
     actual_port = _find_available_port(port)
@@ -117,7 +138,15 @@ def open(
     # to trigger graceful shutdown (lifespan, connection draining).
     if not no_auto_exit:
         pool = fastapi_app.state.connection_pool
-        pool.set_auto_exit(enabled=True, callback=lambda: setattr(server, "should_exit", True))
+
+        def _auto_exit() -> None:
+            # Graceful shutdown, with a hard force-exit watchdog: if
+            # graceful shutdown hangs (e.g. a blocked PTY close), the
+            # watchdog thread still terminates the process.
+            server.should_exit = True
+            _force_exit_watchdog(10.0)
+
+        pool.set_auto_exit(enabled=True, callback=_auto_exit)
 
     # Suppress noisy ConnectionResetError/ConnectionAbortedError on Windows
     # asyncio without swallowing all other exceptions.
@@ -147,16 +176,23 @@ def open(
                 _shutting_down = True
                 console.print("\n[yellow]Ctrl+C received — shutting down surf-ssh...[/yellow]")
                 server.should_exit = True
-                loop.call_later(3.0, lambda: os._exit(0))
+                _force_exit_watchdog(3.0)
             loop.add_signal_handler(signal.SIGINT, _on_sigint)
         await server.serve()
 
     # Open browser in a short-lived background thread before server starts
     if not no_browser:
-        threading.Thread(
-            target=lambda: (time.sleep(0.5), webbrowser.open(url)),
-            daemon=True,
-        ).start()
+        # Open a browser with a freshly minted token — the token goes
+        # straight to the browser, never to stdout/logs.
+        def _open_browser() -> None:
+            try:
+                url = _mint_url_via_socket(timeout=10.0)
+                if url:
+                    webbrowser.open(url)
+            except Exception:
+                pass
+
+        threading.Thread(target=lambda: (time.sleep(0.5), _open_browser()), daemon=True).start()
 
     # On Windows, install SIGINT handler via signal.signal() before
     # asyncio.run(). This gives immediate feedback and a watchdog thread
@@ -236,10 +272,14 @@ def daemon(
         console.print(f"[red]Port {port} is in use by another process[/red]")
         raise typer.Exit(1)
 
-    url = f"https://localhost:{port}/ui"
+    # Control socket: mints session tokens on demand via `surf-ssh url`.
+    # The token never appears in daemon stdout (system logs persist it).
+    from src.daemon.control import ControlSocketServer
+
+    control_server = ControlSocketServer(session_mgr, port, CONFIG_DIR)
 
     console.print(f"[green]Starting surf-ssh daemon[/green] (no host — client picks from UI)")
-    console.print(f"[dim]URL: {url}[/dim]")
+    console.print(f"[dim]Port: {port} — connect with: surf-ssh url[/dim]")
 
     import uvicorn
 
@@ -280,15 +320,26 @@ def daemon(
                 _shutting_down = True
                 console.print("\n[yellow]Ctrl+C received — shutting down surf-ssh...[/yellow]")
                 server.should_exit = True
-                loop.call_later(3.0, lambda: os._exit(0))
+                _force_exit_watchdog(3.0)
             loop.add_signal_handler(signal.SIGINT, _on_sigint)
-        await server.serve()
+        await control_server.start()
+        try:
+            await server.serve()
+        finally:
+            await control_server.stop()
 
     if not no_browser:
-        threading.Thread(
-            target=lambda: (time.sleep(0.5), webbrowser.open(url)),
-            daemon=True,
-        ).start()
+        # Open a browser with a freshly minted token — the token goes
+        # straight to the browser, never to stdout/logs.
+        def _open_browser() -> None:
+            try:
+                minted = _mint_url_via_socket(timeout=10.0)
+                if minted:
+                    webbrowser.open(minted)
+            except Exception:
+                pass
+
+        threading.Thread(target=lambda: (time.sleep(0.5), _open_browser()), daemon=True).start()
 
     if sys.platform == "win32":
         import signal
@@ -320,6 +371,64 @@ def daemon(
         console.print("[green]Goodbye![/green]")
         import os
         os._exit(0)
+
+
+def _mint_url_via_socket(timeout: float = 5.0) -> str | None:
+    """Ask the running daemon to mint a fresh session URL.
+
+    Connects to the control socket (~/.surf-ssh/control.sock, 0600,
+    same-user only) and sends {"command": "mint"}. Returns the URL or
+    None if no daemon is listening.
+    """
+    import asyncio
+    import json as _json
+
+    from src.daemon.control import CONTROL_SOCK_NAME
+
+    sock_path = CONFIG_DIR / CONTROL_SOCK_NAME
+
+    async def _request() -> str | None:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(str(sock_path)), timeout=timeout
+            )
+        except (FileNotFoundError, ConnectionError, asyncio.TimeoutError):
+            return None
+        try:
+            writer.write((_json.dumps({"command": "mint"}) + "\n").encode("utf-8"))
+            await writer.drain()
+            raw = await asyncio.wait_for(reader.readline(), timeout=timeout)
+            response = _json.loads(raw.decode("utf-8"))
+            return response.get("url")
+        except (json.JSONDecodeError, asyncio.TimeoutError, UnicodeDecodeError):
+            return None
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    return asyncio.run(_request())
+
+
+@app.command()
+def url(
+    open_browser: bool = typer.Option(False, "--open", help="Open the URL in a browser"),
+) -> None:
+    """Print a fresh authenticated URL for the running daemon.
+
+    Asks the daemon (via its control socket) to mint a new session
+    token. The token appears only in this terminal — never in the
+    daemon's stdout or system logs.
+    """
+    result = _mint_url_via_socket()
+    if not result:
+        console.print("[red]No running daemon found[/red] — start one with: surf-ssh daemon")
+        raise typer.Exit(1)
+    console.print(result)
+    if open_browser:
+        webbrowser.open(result)
 
 
 @app.command()

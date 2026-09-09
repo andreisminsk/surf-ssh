@@ -10,6 +10,7 @@ import uuid
 import asyncssh
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
+from src.api.ws_auth import require_ws_auth
 from src.ssh.connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -106,23 +107,26 @@ async def terminal_ws(
     pool: ConnectionPool = Depends(get_pool),
 ) -> None:
     """WebSocket endpoint for interactive terminal sessions."""
+    if await require_ws_auth(websocket) is None:
+        return
     await websocket.accept()
 
-    # Acquire terminal slot
-    if not pool.acquire_terminal_slot(host):
+    # Register as a live client for heartbeat/liveness tracking
+    terminal_client_id = str(uuid.uuid4())
+
+    # Acquire terminal slot (per-client so the reaper can release frozen ones)
+    if not pool.acquire_terminal_slot(host, terminal_client_id):
         await websocket.send_json({"type": "error", "message": "Too many terminal sessions for this host"})
         await websocket.close()
         return
 
-    # Register as a live client for heartbeat/liveness tracking
-    terminal_client_id = str(uuid.uuid4())
     pool.register_client(host, terminal_client_id, "terminal")
 
     try:
         conn = await pool.get_connection(host)
     except asyncssh.Error as e:
         await websocket.send_json({"type": "error", "message": f"SSH connection failed: {e}"})
-        pool.release_terminal_slot(host)
+        pool.release_terminal_slot(host, terminal_client_id)
         await websocket.close()
         return
 
@@ -183,7 +187,7 @@ async def terminal_ws(
             except asyncio.CancelledError:
                 pass
         await term_manager.close()
-        pool.release_terminal_slot(host)
+        pool.release_terminal_slot(host, terminal_client_id)
         pool.unregister_client(host, terminal_client_id)
         try:
             await websocket.close()

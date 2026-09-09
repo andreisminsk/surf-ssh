@@ -1,5 +1,17 @@
 const API_BASE = '/api/v1';
 
+// Per-tab client ID for liveness tracking. Without this, all tabs share
+// the session token as their client ID and are counted as one client —
+// closing one tab can trigger premature auto-exit of the daemon.
+function getClientId(): string {
+  let id = sessionStorage.getItem('surf-ssh-client-id');
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem('surf-ssh-client-id', id);
+  }
+  return id;
+}
+
 export interface TreeNode {
   path: string;
   name: string;
@@ -38,6 +50,7 @@ export interface FileStat {
 async function apiFetch(path: string): Promise<Response> {
   const resp = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
+    headers: { 'X-Client-ID': getClientId() },
   });
   if (!resp.ok) {
     const detail = await resp.json().catch(() => ({ detail: resp.statusText }));

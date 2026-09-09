@@ -1,7 +1,26 @@
 """Unit tests for path_validator.py — the primary security boundary."""
 
 import pytest
-from src.security.path_validator import validate_path, PathValidationError
+from src.security.path_validator import (
+    PathValidationError,
+    resolve_and_validate,
+    validate_path,
+)
+
+
+class FakeSftp:
+    """Minimal SFTPClient stub for resolve_and_validate tests."""
+
+    def __init__(self, mapping: dict[str, str] | None = None, fail: bool = False):
+        self.mapping = mapping or {}
+        self.fail = fail
+
+    async def realpath(self, host: str, path: str) -> str:
+        if self.fail:
+            raise OSError("connection broken")
+        if path in self.mapping:
+            return self.mapping[path]
+        raise OSError("no such file")
 
 
 class TestValidPaths:
@@ -112,3 +131,28 @@ class TestEdgeCases:
         # We don't expand ~ — it's a remote path
         result = validate_path("/home/~user/file")
         assert "~user" in result
+
+
+class TestResolveAndValidate:
+    """Tests for symlink-aware path resolution."""
+
+    async def test_resolves_symlink_to_canonical_path(self):
+        sftp = FakeSftp({"/home/user/link": "/etc/hostname"})
+        result = await resolve_and_validate(sftp, "host", "/home/user/link")
+        assert result == "/etc/hostname"
+
+    async def test_falls_back_when_realpath_fails(self):
+        sftp = FakeSftp(fail=True)
+        result = await resolve_and_validate(sftp, "host", "/home/user/doc.md")
+        assert result == "/home/user/doc.md"
+
+    async def test_rejects_traversal_in_resolved_path(self):
+        # A hostile server whose realpath returns '..' components
+        sftp = FakeSftp({"/home/user/x": "/etc/../../root"})
+        with pytest.raises(PathValidationError, match="[Ss]ymlink"):
+            await resolve_and_validate(sftp, "host", "/home/user/x")
+
+    async def test_rejects_traversal_in_raw_path(self):
+        sftp = FakeSftp()
+        with pytest.raises(PathValidationError):
+            await resolve_and_validate(sftp, "host", "../../etc/passwd")

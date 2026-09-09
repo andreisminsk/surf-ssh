@@ -9,6 +9,7 @@ import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from src.api.ws_auth import require_ws_auth
 from src.daemon.local_pty import LocalPtyManager, LocalPtyRegistry, discover_shells, get_shell_by_id
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,8 @@ async def local_terminal_ws(
     shell: str = "default",
 ) -> None:
     """WebSocket endpoint for interactive local terminal sessions."""
+    if await require_ws_auth(websocket) is None:
+        return
     await websocket.accept()
 
     # Validate shell parameter

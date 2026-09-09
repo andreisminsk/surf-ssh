@@ -342,11 +342,57 @@ pyinstaller --onefile --name surf-ssh src/main.py
 
 ```
 ~/.surf-ssh/
-  ├── ca.pem          # Self-signed CA certificate
-  ├── ca-key.pem      # CA private key
-  ├── config.json     # User preferences (port, theme, etc.)
-  └── sessions/       # Active session tokens
+├── ca.pem          # Self-signed CA certificate
+├── ca-key.pem      # CA private key
+├── config.json     # User preferences (port, theme, etc.)
+├── control.sock    # Control socket (daemon mode only, 0600, same-user)
+└── sessions/       # Active session tokens (sha256-named, 0600, 24h TTL)
 ```
+
+### 10.4 Daemon Mode & Control Socket (LaunchDaemon/systemd)
+
+Daemon mode is designed for persistent deployment via LaunchDaemon (macOS)
+or systemd (Linux). The core security constraint: **the session token must
+never appear in system logs** (journald / unified log persist stdout).
+
+**Design: control socket + `surf-ssh url`**
+
+```
+surf-ssh daemon                    surf-ssh url
+     │                                  │
+     │ creates ~/.surf-ssh/control.sock  │ connects (same user only, 0600)
+     │ (Unix domain socket, 0600)        │
+     └────────────┬─────────────────────┘
+                  │ JSON: {"command": "mint"}
+                  ▼
+     daemon mints a fresh session token,
+     replies {"url": "https://localhost:8443/api/v1/auth/exchange?token=…"}
+                  │
+                  ▼
+     CLI prints it to the user's terminal (or opens browser with --open)
+```
+
+**Properties:**
+- **No token in logs** — daemon stdout prints only the port and a hint to
+  run `surf-ssh url`. The secret exists only in daemon memory, the socket
+  reply, and the user's terminal.
+- **No token on disk** — session files store only `{"created": …}` with
+  sha256 filenames; the raw token is never persisted.
+- **Same-user enforcement** — Unix domain socket with 0600 permissions;
+  only processes running as the same user can connect. No TCP port to
+  probe from other local accounts.
+- **TTL-friendly** — tokens are minted on demand, so the 24h session TTL
+  never strands a long-running daemon: run `surf-ssh url` again for a
+  fresh URL.
+- **Service-manager friendly** — strict port, exit 0 when a healthy
+  daemon already runs, exit 1 on port conflict; auto-exit always off.
+
+**LaunchDaemon (macOS):** plist with `RunAtLoad` + `KeepAlive`. The daemon
+starts at boot with no GUI session; the user runs `surf-ssh url` in a
+terminal to connect.
+
+**systemd (Linux):** unit with `Restart=on-failure`; same flow —
+`surf-ssh url` prints a fresh authenticated URL on demand.
 
 ---
 

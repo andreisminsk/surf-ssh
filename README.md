@@ -34,6 +34,7 @@ surf-ssh open my-server --no-browser
 surf-ssh open my-server --no-auto-exit
 
 # Daemon mode — no host, clients pick from UI (for LaunchDaemon/systemd)
+# Prints an authenticated URL — open it to establish a session
 surf-ssh daemon
 
 # Daemon mode with browser
@@ -103,11 +104,15 @@ surf-ssh/
 ## Security
 
 - **Local only**: Daemon binds to `127.0.0.1` exclusively
-- **Session auth**: Token passed via URL on first load, exchanged for `HttpOnly` + `Secure` + `SameSite=Strict` cookie
-- **Path traversal**: Rejects `..` components, resolves symlinks via `sftp.realpath()`
+- **Session auth**: Token passed via URL on first load, exchanged for `HttpOnly` + `Secure` + `SameSite=Strict` cookie; sessions expire after 24h and are stored as sha256-hashed filenames with `0600` permissions
+- **WebSocket auth**: All WS endpoints (remote terminal, local console, liveness) validate the session cookie before accepting the handshake
+- **Path traversal**: Rejects `..` components, resolves symlinks via `sftp.realpath()` with re-validation, and contains static asset serving inside `ui/dist`
 - **SSRF**: CSP `img-src 'self'` blocks external image loads from rendered content
 - **HTML sandbox**: `sandbox=""` iframe prevents script execution and API access
-- **Liveness reaper**: A background task periodically closes SSH connections whose clients have stopped responding to heartbeats, preventing connection leaks
+- **Liveness reaper**: A background task periodically closes SSH connections whose clients have stopped responding to heartbeats, preventing connection leaks — including frozen terminal sessions
+- **TLS keys**: Private keys are written with `0600` permissions
+- **Docs off by default**: OpenAPI/Swagger UI disabled unless `SURF_SSH_DEV=1`
+- **Update check**: At most one outbound GitHub request per 24h; disable with `--no-update-check`
 
 ## Daemon Mode
 

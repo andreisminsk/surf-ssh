@@ -9,6 +9,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
+from src.api.ws_auth import require_ws_auth
 from src.ssh.connection_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,11 @@ async def liveness_ws(
     """Server-initiated heartbeat endpoint.
 
     Client must respond to {"type":"ping"} with {"type":"pong"} within
-    PING_TIMEOUT seconds. If 3 consecutive pings are missed, the server
-    closes the connection and the reaper cleans up the SSH connection.
+    If 3 consecutive pings are missed, the server closes the connection
+    and the reaper cleans up the SSH connection.
     """
+    if await require_ws_auth(websocket) is None:
+        return
     await websocket.accept()
 
     if not host:

@@ -26,7 +26,13 @@ async def serve_spa_root() -> FileResponse:
 @router.get("/ui/{path:path}", response_class=HTMLResponse, response_model=None)
 async def serve_spa_asset(path: str) -> FileResponse | HTMLResponse:
     """Serve SPA static assets or fall back to index.html for client-side routing."""
-    file_path = _STATIC_DIR / path
+    # Containment check: the path arrives URL-decoded, so encoded traversal
+    # sequences ("..%2f..") reach here as literal ".." components. Resolve
+    # and verify the result stays inside the static directory.
+    static_root = _STATIC_DIR.resolve()
+    file_path = (_STATIC_DIR / path).resolve()
+    if not file_path.is_relative_to(static_root):
+        raise HTTPException(status_code=404, detail="Not found")
     if file_path.exists() and file_path.is_file():
         return FileResponse(file_path)
     # SPA fallback

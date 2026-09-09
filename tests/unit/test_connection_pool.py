@@ -28,10 +28,18 @@ class TestTerminalSlots:
         assert pool.acquire_terminal_slot("host1") is True
 
     def test_max_terminals_per_host(self, pool):
-        assert pool.acquire_terminal_slot("host1") is True
-        assert pool.acquire_terminal_slot("host1") is True
-        assert pool.acquire_terminal_slot("host1") is True
-        assert pool.acquire_terminal_slot("host1") is False  # 4th rejected
+        assert pool.acquire_terminal_slot("host1", "c1") is True
+        assert pool.acquire_terminal_slot("host1", "c2") is True
+        assert pool.acquire_terminal_slot("host1", "c3") is True
+        assert pool.acquire_terminal_slot("host1", "c4") is False  # 4th rejected
+
+    def test_same_client_id_is_one_slot(self, pool):
+        # Idempotent per client — a duplicate acquire doesn't consume a slot
+        assert pool.acquire_terminal_slot("host1", "c1") is True
+        assert pool.acquire_terminal_slot("host1", "c1") is True
+        assert pool.acquire_terminal_slot("host1", "c2") is True
+        assert pool.acquire_terminal_slot("host1", "c3") is True
+        assert pool.acquire_terminal_slot("host1", "c4") is False
 
     def test_different_hosts_independent(self, pool):
         pool.acquire_terminal_slot("host1")
@@ -44,11 +52,29 @@ class TestTerminalSlots:
         assert pool.acquire_terminal_slot("host1") is True
 
     def test_release_makes_slot_available(self, pool):
-        for _ in range(3):
-            pool.acquire_terminal_slot("host1")
-        assert pool.acquire_terminal_slot("host1") is False
-        pool.release_terminal_slot("host1")
-        assert pool.acquire_terminal_slot("host1") is True
+        for cid in ("c1", "c2", "c3"):
+            pool.acquire_terminal_slot("host1", cid)
+        assert pool.acquire_terminal_slot("host1", "c4") is False
+        pool.release_terminal_slot("host1", "c2")
+        assert pool.acquire_terminal_slot("host1", "c4") is True
+
+    def test_reaper_releases_frozen_terminal_slot(self, pool):
+        """A frozen terminal WS (never released) must not leak its slot.
+
+        The reaper evicts stale clients and releases their terminal slots,
+        allowing the SSH connection to close instead of leaking forever.
+        """
+        pool.acquire_terminal_slot("host1", "frozen-client")
+        pool.register_client("host1", "frozen-client", "terminal")
+        # Simulate staleness: last_seen older than ping timeout
+        pool._client_registry._clients["host1"]["frozen-client"].last_seen = (
+            time.monotonic() - 999.0
+        )
+        asyncio.run(pool._reap())
+        # Slot released by the reaper
+        assert "frozen-client" not in pool._terminal_slots.get("host1", set())
+        # And a new terminal can acquire the freed slot
+        assert pool.acquire_terminal_slot("host1", "new-client") is True
 
 
 class TestSFTPSemaphore:

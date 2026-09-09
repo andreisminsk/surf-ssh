@@ -108,7 +108,7 @@ class ConnectionPool:
         self._locks: dict[str, asyncio.Lock] = {}
         self._last_access: dict[str, float] = {}
         self._sftp_semaphores: dict[str, asyncio.Semaphore] = {}
-        self._terminal_counts: dict[str, int] = {}
+        self._terminal_slots: dict[str, set[str]] = {}  # host → set of client_ids
         self._max_connections = max_connections
         self._idle_timeout = idle_timeout
         self._max_sftp_channels = max_sftp_channels
@@ -174,19 +174,21 @@ class ConnectionPool:
             self._sftp_semaphores[host] = asyncio.Semaphore(self._max_sftp_channels)
         return self._sftp_semaphores[host]
 
-    def acquire_terminal_slot(self, host: str) -> bool:
-        """Try to acquire a terminal session slot. Returns True if available."""
-        count = self._terminal_counts.get(host, 0)
-        if count >= self._max_terminals_per_host:
+    def acquire_terminal_slot(self, host: str, client_id: str = "") -> bool:
+        """Try to acquire a terminal session slot. Returns True if available.
+
+        Slots are tracked per client_id so the reaper can release slots of
+        frozen/crashed terminal sessions (a plain counter would leak them).
+        """
+        slots = self._terminal_slots.setdefault(host, set())
+        if len(slots) >= self._max_terminals_per_host:
             return False
-        self._terminal_counts[host] = count + 1
+        slots.add(client_id)
         return True
 
-    def release_terminal_slot(self, host: str) -> None:
-        """Release a terminal session slot."""
-        count = self._terminal_counts.get(host, 0)
-        if count > 0:
-            self._terminal_counts[host] = count - 1
+    def release_terminal_slot(self, host: str, client_id: str = "") -> None:
+        """Release a terminal session slot (idempotent per client_id)."""
+        self._terminal_slots.get(host, set()).discard(client_id)
 
     async def get_status(self, host: str) -> str:
         """Return connection status for a host: connected, disconnected."""
@@ -326,6 +328,9 @@ class ConnectionPool:
         # 1. Evict stale clients
         for host, client_id in self._client_registry.get_stale_client_ids():
             logger.info("Evicting stale client %s for host %s", client_id, host)
+            # A frozen terminal WS never releases its slot — release it here
+            # so the SSH connection can be closed instead of leaking.
+            self.release_terminal_slot(host, client_id)
             self._client_registry.unregister(host, client_id)
             if self._client_registry.get_live_count(host) == 0:
                 self._last_client_left[host] = now
@@ -339,7 +344,7 @@ class ConnectionPool:
                 continue
             if host in self._connections and not self._connections[host].is_closed():
                 # Don't close if there are active terminal sessions still
-                if self._terminal_counts.get(host, 0) > 0:
+                if len(self._terminal_slots.get(host, ())) > 0:
                     continue
                 logger.info("Reaper: closing SSH connection to %s (no live clients)", host)
                 try:

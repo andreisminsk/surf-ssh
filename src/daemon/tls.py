@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import os
 from pathlib import Path
 
 from cryptography import x509
@@ -27,6 +28,12 @@ def ensure_tls_certificates(config_dir: Path) -> tuple[Path, Path]:
 
     if not (cert_path.exists() and key_path.exists()):
         _generate_localhost_cert(ca_cert_path, ca_key_path, cert_path, key_path)
+
+    # Harden permissions on any pre-existing key files (fixes keys created
+    # before this hardening, which inherited the process umask — often 0644).
+    for key_file in (ca_key_path, key_path):
+        if key_file.exists():
+            os.chmod(key_file, 0o600)
 
     return cert_path, key_path
 
@@ -60,6 +67,8 @@ def _generate_ca(cert_path: Path, key_path: Path) -> None:
         serialization.PrivateFormat.TraditionalOpenSSL,
         serialization.NoEncryption(),
     ))
+    os.chmod(key_path, 0o600)
+    os.chmod(key_path, 0o600)
 
 
 def _generate_localhost_cert(
