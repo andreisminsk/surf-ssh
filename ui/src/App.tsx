@@ -221,6 +221,7 @@ function App() {
   const [unauthorized, setUnauthorized] = useState(false);
   const [totpEnabled, setTotpEnabled] = useState<boolean | null>(null);
   const [passwordHost, setPasswordHost] = useState<string | null>(null);
+  const [passwordReason, setPasswordReason] = useState<string | null>(null);
 
   // Check whether 2FA is available on this daemon (drives the 401 screen)
   useEffect(() => {
@@ -235,6 +236,7 @@ function App() {
     setAuthFlowErrorHandler((host, detail) => {
       if (['password_required', 'invalid_password', 'host_key_unknown', 'host_key_changed'].includes(detail)) {
         setPasswordHost(host);
+        setPasswordReason(detail);
       }
     });
     return () => setAuthFlowErrorHandler(null);
@@ -423,8 +425,10 @@ function App() {
     return (
       <PasswordPrompt
         host={passwordHost}
+        reason={passwordReason}
         onConnected={() => {
           setPasswordHost(null);
+          setPasswordReason(null);
           clearError();
           // Re-fetch home (failed during the prompt) and reload the tree.
           // fetchHome sets rootPath, which retriggers the tree load effect.

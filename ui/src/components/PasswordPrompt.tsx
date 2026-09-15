@@ -2,12 +2,17 @@ import { useState, useEffect } from 'react';
 
 interface Props {
   host: string;
+  /** Why the prompt appeared: password_required | invalid_password |
+   *  host_key_unknown | host_key_changed | null (unknown — probe) */
+  reason?: string | null;
   onConnected: () => void;
 }
 
 /** Renders when the API reports password_required / invalid_password,
- *  or a host key needs TOFU confirmation. */
-export function PasswordPrompt({ host, onConnected }: Props) {
+ *  or a host key needs TOFU confirmation. When `reason` is known, the
+ *  correct view renders immediately (no password-form flash); when
+ *  null, a brief probe determines it. */
+export function PasswordPrompt({ host, reason, onConnected }: Props) {
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
   const [needsUsername, setNeedsUsername] = useState(false);
@@ -16,6 +21,15 @@ export function PasswordPrompt({ host, onConnected }: Props) {
   const [busy, setBusy] = useState(false);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [keyChanged, setKeyChanged] = useState(false);
+  const [keyData, setKeyData] = useState('');
+  // Resolved view: 'trust' | 'password' | null (still determining)
+  const [view, setView] = useState<string | null>(
+    reason === 'host_key_unknown' || reason === 'host_key_changed'
+      ? 'trust'
+      : reason === 'password_required' || reason === 'invalid_password'
+        ? 'password'
+        : null
+  );
 
   // Show a username field when the host has no User line in ~/.ssh/config
   useEffect(() => {
@@ -25,26 +39,34 @@ export function PasswordPrompt({ host, onConnected }: Props) {
       .catch(() => {});
   }, [host]);
 
-  // On mount: probe via /home (it actually connects — /status only checks
-  // the in-memory connection dict and never surfaces host key errors).
-  // If the host key is unknown/changed, show the fingerprint dialog
-  // immediately (before asking for a password).
+  // Probe /home: it actually connects (unlike /status, which only checks
+  // the in-memory dict). Determines the view when unknown, and always
+  // fetches key data for trust views.
   useEffect(() => {
+    if (view === 'password') return;
+    let cancelled = false;
     fetch(`/api/v1/hosts/${encodeURIComponent(host)}/home`, { credentials: 'include' })
       .then(r => {
+        if (cancelled) return;
         if (r.status === 419) {
           const fp = r.headers.get('X-Fingerprint') || '';
           const kd = r.headers.get('X-Key-Data') || '';
           setKeyData(kd);
+          setFingerprint(fp);
           r.json().then(data => {
-            setFingerprint(fp);
+            if (cancelled) return;
             setKeyChanged(data.detail === 'host_key_changed');
-          }).catch(() => setFingerprint(fp));
+          }).catch(() => {});
+          setView('trust');
+        } else if (view === null) {
+          // Unknown reason + no host key issue → password (or connected)
+          setView('password');
         }
         return null;
       })
-      .catch(() => {});
-  }, [host]);
+      .catch(() => { if (!cancelled && view === null) setView('password'); });
+    return () => { cancelled = true; };
+  }, [host, view]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -93,8 +115,6 @@ export function PasswordPrompt({ host, onConnected }: Props) {
     }
   }
 
-  const [keyData, setKeyData] = useState('');
-
   async function trustKey() {
     if (!keyData) return;
     setBusy(true);
@@ -130,28 +150,34 @@ export function PasswordPrompt({ host, onConnected }: Props) {
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
       <div style={{ textAlign: 'center', maxWidth: 420, width: '90%' }}>
         <h1>🔑 {host}</h1>
-        {fingerprint ? (
-          <div>
-            <p style={{ color: keyChanged ? 'var(--error, #e06c75)' : 'var(--text-secondary)' }}>
-              {keyChanged
-                ? '⚠️ HOST KEY CHANGED — possible man-in-the-middle attack!'
-                : 'Host key unknown. Verify the fingerprint out-of-band:'}
-            </p>
-            <code style={{ display: 'block', margin: '0.75rem 0', wordBreak: 'break-all', fontSize: '0.85rem' }}>
-              {fingerprint}
-            </code>
-            <button onClick={trustKey} disabled={busy} style={{
-              padding: '0.75rem 1.5rem',
-              background: keyChanged ? 'var(--error, #e06c75)' : 'var(--accent, #89b4fa)',
-              border: 'none',
-              borderRadius: '6px',
-              color: '#1e1e2e',
-              cursor: busy ? 'wait' : 'pointer',
-              fontWeight: 600,
-            }}>
-              {keyChanged ? 'I understand the risk — trust new key' : 'Trust this key'}
-            </button>
-          </div>
+        {view === null ? (
+          <p style={{ color: 'var(--text-secondary)' }}>Checking host…</p>
+        ) : view === 'trust' ? (
+          fingerprint ? (
+            <div>
+              <p style={{ color: keyChanged ? 'var(--error, #e06c75)' : 'var(--text-secondary)' }}>
+                {keyChanged
+                  ? '⚠️ HOST KEY CHANGED — possible man-in-the-middle attack!'
+                  : 'Host key unknown. Verify the fingerprint out-of-band:'}
+              </p>
+              <code style={{ display: 'block', margin: '0.75rem 0', wordBreak: 'break-all', fontSize: '0.85rem' }}>
+                {fingerprint}
+              </code>
+              <button onClick={trustKey} disabled={busy || !keyData} style={{
+                padding: '0.75rem 1.5rem',
+                background: keyChanged ? 'var(--error, #e06c75)' : 'var(--accent, #89b4fa)',
+                border: 'none',
+                borderRadius: '6px',
+                color: '#1e1e2e',
+                cursor: busy ? 'wait' : 'pointer',
+                fontWeight: 600,
+              }}>
+                {keyChanged ? 'I understand the risk — trust new key' : 'Trust this key'}
+              </button>
+            </div>
+          ) : (
+            <p style={{ color: 'var(--text-secondary)' }}>Retrieving host key…</p>
+          )
         ) : (
           <form onSubmit={submit}>
             <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
