@@ -156,7 +156,7 @@ export function FileViewer({ host, path }: Props) {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {metaBar}
         <div className="viewer-container">
-          <div className="error-banner">{error}</div>
+          <div className="error-banner"><span>{error}</span><button className="error-close" onClick={() => setError(null)} title="Dismiss">✕</button></div>
         </div>
       </div>
     );

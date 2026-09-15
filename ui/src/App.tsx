@@ -569,7 +569,7 @@ function App() {
               )}
             </div>
           </div>
-          {error && <div className="error-banner">{error}</div>}
+          {error && <div className="error-banner"><span>{error}</span><button className="error-close" onClick={clearError} title="Dismiss">✕</button></div>}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative' }}>
             {tabs.map(tab => {
               if (!mountedTabs.has(tab.id)) return null;

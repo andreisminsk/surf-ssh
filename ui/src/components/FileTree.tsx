@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { TreeNode } from '../api/client';
 import {
   FolderOpenIcon, FolderIcon, FileIcon,
@@ -95,9 +95,52 @@ function copyToClipboard(text: string): Promise<boolean> {
       // Rare double-failure: activation may be expired by now, but try anyway.
       .catch(() => legacyCopy(text));
   }
-
   // Non-secure context — run the legacy path synchronously (fresh activation).
   return Promise.resolve(legacyCopy(text));
+}
+
+/** Build an scp command string for the given host, path, and direction.
+ *  Ad-hoc hosts (adhoc:user@host:port) are unpacked into explicit user/port args.
+ *  Directories get -r. Paths with special characters are single-quoted. */
+function buildScpCommand(host: string, remotePath: string, direction: 'download' | 'upload', isDir: boolean): string {
+  let scpHost: string;
+  let portArg = '';
+
+  if (host.startsWith('adhoc:')) {
+    const spec = host.slice(6);
+    let userPart = '';
+    let hostname = spec;
+
+    if (spec.includes('@')) {
+      const atIdx = spec.indexOf('@');
+      userPart = spec.slice(0, atIdx + 1);
+      hostname = spec.slice(atIdx + 1);
+    }
+
+    if (hostname.includes(':')) {
+      const colonIdx = hostname.lastIndexOf(':');
+      const port = hostname.slice(colonIdx + 1);
+      hostname = hostname.slice(0, colonIdx);
+      if (port !== '22') {
+        portArg = ` -P ${port}`;
+      }
+    }
+
+    scpHost = userPart + hostname;
+  } else {
+    scpHost = host;
+  }
+
+  const rArg = isDir ? ' -r' : '';
+  const remoteSpec = `${scpHost}:${remotePath}`;
+  const needsQuoting = /[^a-zA-Z0-9\/_.\-~]/.test(remotePath);
+  const quotedSpec = needsQuoting ? `'${remoteSpec.replace(/'/g, "'\\''")}'` : remoteSpec;
+
+  if (direction === 'download') {
+    return `scp${rArg}${portArg} ${quotedSpec} <local_name>`;
+  } else {
+    return `scp${rArg}${portArg} <local_name> ${quotedSpec}`;
+  }
 }
 
 export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelectFile, onRefreshAll, rootPath, homePath, onRootChange, platform, width }: Props) {
@@ -106,17 +149,30 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [copiedPos, setCopiedPos] = useState<{ x: number; y: number } | null>(null);
   const [copyFailed, setCopyFailed] = useState<{ x: number; y: number } | null>(null);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
 
-  const doCopy = async (path: string) => {
-    const text = toNativePath(path, platform);
+  useLayoutEffect(() => {
+    if (ctxMenu && ctxMenuRef.current) {
+      const rect = ctxMenuRef.current.getBoundingClientRect();
+      if (rect.bottom > window.innerHeight) {
+        ctxMenuRef.current.style.top = `${window.innerHeight - rect.height - 4}px`;
+      }
+      if (rect.right > window.innerWidth) {
+        ctxMenuRef.current.style.left = `${window.innerWidth - rect.width - 4}px`;
+      }
+    }
+  });
+
+  const doCopyText = async (text: string) => {
+    const pos = ctxMenu ? { x: ctxMenu.x, y: ctxMenu.y } : { x: 0, y: 0 };
     const ok = await copyToClipboard(text);
     if (!ok) {
-      setCopyFailed(ctxMenu ? { x: ctxMenu.x, y: ctxMenu.y } : { x: 0, y: 0 });
+      setCopyFailed(pos);
       setTimeout(() => setCopyFailed(null), 2500);
     } else {
-      setCopiedPath(path);
-      setCopiedPos(ctxMenu ? { x: ctxMenu.x, y: ctxMenu.y } : { x: 0, y: 0 });
+      setCopiedPath(text);
+      setCopiedPos(pos);
       setTimeout(() => { setCopiedPath(null); setCopiedPos(null); }, 1500);
     }
     setCtxMenu(null);
@@ -178,7 +234,7 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
           className={`tree-node ${isSelected ? 'selected' : ''}`}
           style={{ paddingLeft: `${0.5 + depth * 1}rem`, position: 'relative' }}
           onClick={() => isDir ? toggle(node.path) : onSelectFile(node.path)}
-          onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, path: node.path }); }}
+          onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, path: node.path, isDir }); }}
           title={node.size != null ? `Size: ${formatSize(node.size)} · Right-click to copy path` : 'Right-click to copy path'}
         >
             <span className="tree-icon">
@@ -260,23 +316,51 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
         />
       )}
       {ctxMenu && (
-        <div style={{
+        <div ref={ctxMenuRef} style={{
           position: 'fixed', left: ctxMenu.x, top: ctxMenu.y,
           background: 'var(--bg-secondary)', border: '1px solid var(--border)',
           borderRadius: '6px', padding: '4px 0', zIndex: 9999,
-          boxShadow: '0 4px 12px rgba(0,0,0,0.4)', minWidth: '140px',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.4)', minWidth: '240px',
         }}>
           <button
-            onClick={() => doCopy(ctxMenu.path)}
+            onClick={() => doCopyText(toNativePath(ctxMenu.path, platform))}
             style={{
               display: 'block', width: '100%', padding: '6px 12px',
               background: 'none', border: 'none', color: 'var(--text-primary)',
               cursor: 'pointer', textAlign: 'left', fontSize: '0.85rem',
+              whiteSpace: 'nowrap',
             }}
             onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-tertiary)')}
             onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}
           >
             📋 Copy path
+          </button>
+          <div style={{ height: '1px', background: 'var(--border)', margin: '4px 0' }} />
+          <button
+            onClick={() => doCopyText(buildScpCommand(host, ctxMenu.path, 'download', ctxMenu.isDir))}
+            style={{
+              display: 'block', width: '100%', padding: '6px 12px',
+              background: 'none', border: 'none', color: 'var(--text-primary)',
+              cursor: 'pointer', textAlign: 'left', fontSize: '0.85rem',
+              whiteSpace: 'nowrap',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-tertiary)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}
+          >
+            ⬇ Copy 'scp download' command
+          </button>
+          <button
+            onClick={() => doCopyText(buildScpCommand(host, ctxMenu.path, 'upload', ctxMenu.isDir))}
+            style={{
+              display: 'block', width: '100%', padding: '6px 12px',
+              background: 'none', border: 'none', color: 'var(--text-primary)',
+              cursor: 'pointer', textAlign: 'left', fontSize: '0.85rem',
+              whiteSpace: 'nowrap',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-tertiary)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}
+          >
+            ⬆ Copy 'scp upload' command
           </button>
         </div>
       )}
