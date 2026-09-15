@@ -19,10 +19,29 @@ import asyncssh
 class HostKeyError(Exception):
     """Host key validation failed — typed for the API failure taxonomy."""
 
-    def __init__(self, kind: str, fingerprint: str) -> None:
+    def __init__(self, kind: str, fingerprint: str, key_data: str = "") -> None:
         self.kind = kind  # "host_key_unknown" | "host_key_changed"
         self.fingerprint = fingerprint
+        self.key_data = key_data  # full public key (OpenSSH format) for TOFU
         super().__init__(f"{kind}: {fingerprint}")
+
+
+class TofuSSHClient(asyncssh.SSHClient):
+    """SSHClient that captures the server host key during validation.
+
+    validate_host_public_key is called only when the key is NOT in the
+    trusted set — exactly the TOFU case. We record the key and return
+    False (connection fails), then surface it to the user for explicit
+    confirmation. On retry after trust, the key is in known_hosts and
+    validation succeeds normally.
+    """
+
+    def __init__(self) -> None:
+        self.captured_key: asyncssh.SSHKey | None = None
+
+    def validate_host_public_key(self, host: str, addr: str, port: int, key) -> bool:
+        self.captured_key = key
+        return False  # fail the connection — the pool raises HostKeyError
 
 
 class HostKeyTrust:
@@ -35,20 +54,38 @@ class HostKeyTrust:
     def trusted_keys(self):
         """Load trusted host keys for asyncssh.connect(known_hosts=...).
 
-        Returns an SSHKnownHosts object, or None when nothing is trusted
-        yet — in which case the caller passes known_hosts=None and
-        AsyncSSH falls back to the user's ~/.ssh/known_hosts (an ad-hoc
-        host may already be trusted there; only truly unknown hosts
-        enter the TOFU flow).
+        Always returns an SSHKnownHosts object — empty when nothing is
+        trusted yet. An empty object means every presented key is
+        "not trusted", which triggers validate_host_public_key on the
+        TofuSSHClient → key captured → 419 → user confirms → stored.
+        Never return None: that disables validation entirely (MITM gap).
         """
         try:
             data = self._known_hosts.read_bytes()
         except OSError:
-            return None
+            return asyncssh.import_known_hosts("")
         try:
             return asyncssh.import_known_hosts(data.decode("utf-8", "replace"))
         except (OSError, ValueError):
-            return None
+            return asyncssh.import_known_hosts("")
+
+    def merged_known_hosts(self):
+        """One SSHKnownHosts combining the user's ~/.ssh/known_hosts and
+        our TOFU store. Used by config-host connections so keys trusted
+        via the UI dialog validate alongside the user's own entries."""
+        parts: list[str] = []
+        user_kh = Path.home() / ".ssh" / "known_hosts"
+        try:
+            if user_kh.exists():
+                parts.append(user_kh.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+        try:
+            if self._known_hosts.exists():
+                parts.append(self._known_hosts.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass
+        return asyncssh.import_known_hosts("\n".join(parts))
 
     def trust(self, hostname: str, port: int, key_data: bytes) -> None:
         """Append a host key to the trust file (OpenSSH format, 0600)."""

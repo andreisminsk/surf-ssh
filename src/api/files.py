@@ -53,7 +53,7 @@ async def get_file(
         raise HTTPException(status_code=401, detail="password_required") from None
     except HostKeyError as e:
         raise HTTPException(
-            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint, "X-Key-Data": e.key_data}
         ) from e
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -109,7 +109,7 @@ async def get_file(
         raise HTTPException(status_code=401, detail="password_required") from None
     except HostKeyError as e:
         raise HTTPException(
-            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint, "X-Key-Data": e.key_data}
         ) from e
     except asyncssh.Error as e:
         if "No such file" in str(e):
@@ -134,7 +134,7 @@ async def get_stat(
         raise HTTPException(status_code=401, detail="password_required") from None
     except HostKeyError as e:
         raise HTTPException(
-            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint, "X-Key-Data": e.key_data}
         ) from e
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -180,7 +180,7 @@ async def download_file(
         raise HTTPException(status_code=401, detail="password_required") from None
     except HostKeyError as e:
         raise HTTPException(
-            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint, "X-Key-Data": e.key_data}
         ) from e
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e

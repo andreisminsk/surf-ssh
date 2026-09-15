@@ -45,7 +45,7 @@ def _force_exit_watchdog(delay: float) -> None:
 
 @app.command()
 def open(
-    host: str = typer.Argument(..., help="SSH host alias from ~/.ssh/config"),
+    host: str = typer.Argument(None, help="SSH host alias from ~/.ssh/config"),
     port: int = typer.Option(DEFAULT_PORT, "--port", "-p", help="Local HTTPS port"),
     no_browser: bool = typer.Option(False, "--no-browser", help="Do not open browser"),
     no_auto_exit: bool = typer.Option(
@@ -56,6 +56,8 @@ def open(
         False, "--no-update-check",
         help="Skip the outbound update check to GitHub",
     ),
+    cmd: str = typer.Option(None, "--cmd", help="Parse an ssh/scp command string into a config entry and open it"),
+    save: str = typer.Option(None, "--save", help="Save the --cmd config entry under this name (persistent). Without --save, an ephemeral entry is created and removed on exit."),
 ) -> None:
     """Open a browser-based file explorer for a remote SSH host."""
     import asyncio
@@ -66,11 +68,54 @@ def open(
     from src.daemon.tls import ensure_tls_certificates
     from src.security.session_auth import SessionManager
     from src.ssh.config_parser import SSHConfigParser
+    from src.ssh.config_editor import ConfigEditor
+    from src.ssh.cmd_parser import CmdParseError, parse_ssh_command
+    from src.ssh.naming import NameCollisionError, generate_phonetic, validate_user_name
 
-    # Ad-hoc host: "user@host[:port]" or bare hostname not in ~/.ssh/config.
-    # Prompt for the password in the terminal (getpass), register the
-    # synthetic alias, and open the browser against it.
-    if "@" in host or not SSHConfigParser().list_hosts().count(host):
+    # Startup cleanup: remove ephemeral entries orphaned by a previous crash
+    try:
+        ConfigEditor().remove_all_ephemeral()
+    except Exception:
+        pass
+
+    # --cmd mode: parse the command, generate a name, write a config entry
+    _ephemeral_name: str | None = None
+
+    if cmd:
+        try:
+            parsed = parse_ssh_command(cmd)
+        except CmdParseError as e:
+            console.print(f"[red]Cannot parse command: {e}[/red]")
+            raise typer.Exit(1)
+
+        existing_hosts = set(SSHConfigParser().list_hosts())
+
+        if save:
+            try:
+                name = validate_user_name(save, existing_hosts)
+                tag = "persistent"
+            except NameCollisionError as e:
+                console.print(f"[red]{e}[/red]")
+                raise typer.Exit(1)
+        else:
+            name = generate_phonetic(existing_hosts)
+            tag = "ephemeral"
+            _ephemeral_name = name
+
+        editor = ConfigEditor()
+        editor.append_entry(name, parsed, tag=tag)
+        console.print(f"[green]Created config entry:[/green] {name}")
+        if save:
+            console.print(f"[dim]Saved permanently in ~/.ssh/config as '{name}'[/dim]")
+        else:
+            console.print(f"[dim]Ephemeral — will be removed on exit[/dim]")
+
+        host = name
+        _adhoc_spec = None
+    elif host is None:
+        console.print("[red]Provide a host alias or use --cmd[/red]")
+        raise typer.Exit(1)
+    elif "@" in host or not SSHConfigParser().list_hosts().count(host):
         import getpass
 
         spec = host
@@ -211,6 +256,8 @@ def open(
                 server.should_exit = True
                 _force_exit_watchdog(3.0)
             loop.add_signal_handler(signal.SIGINT, _on_sigint)
+            # SIGTERM (kill, service manager stop) — same graceful path
+            loop.add_signal_handler(signal.SIGTERM, _on_sigint)
         await server.serve()
 
     # Open browser in a short-lived background thread before server starts
@@ -255,6 +302,12 @@ def open(
         # during asyncio.run startup), handle here.
         console.print("\n[yellow]Shutting down surf-ssh...[/yellow]")
     finally:
+        # Remove ephemeral config entries created by --cmd (without --save)
+        if _ephemeral_name:
+            try:
+                ConfigEditor().remove_entry(_ephemeral_name)
+            except Exception:
+                pass
         console.print("[green]Goodbye![/green]")
         # Safety net: force exit in case non-daemon executor threads
         # (e.g. blocked PTY reads) keep the process alive.
@@ -289,6 +342,13 @@ def daemon(
 
     session_mgr = SessionManager(CONFIG_DIR / "sessions")
     cert_path, key_path = ensure_tls_certificates(CONFIG_DIR)
+
+    # Startup cleanup: remove ephemeral entries orphaned by a previous crash
+    try:
+        from src.ssh.config_editor import ConfigEditor
+        ConfigEditor().remove_all_ephemeral()
+    except Exception:
+        pass
 
     # Option B: check if a healthy daemon is already running on this port
     if _is_daemon_running(port, cert_path):

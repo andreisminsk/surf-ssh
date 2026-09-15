@@ -25,6 +25,27 @@ export function PasswordPrompt({ host, onConnected }: Props) {
       .catch(() => {});
   }, [host]);
 
+  // On mount: probe via /home (it actually connects — /status only checks
+  // the in-memory connection dict and never surfaces host key errors).
+  // If the host key is unknown/changed, show the fingerprint dialog
+  // immediately (before asking for a password).
+  useEffect(() => {
+    fetch(`/api/v1/hosts/${encodeURIComponent(host)}/home`, { credentials: 'include' })
+      .then(r => {
+        if (r.status === 419) {
+          const fp = r.headers.get('X-Fingerprint') || '';
+          const kd = r.headers.get('X-Key-Data') || '';
+          setKeyData(kd);
+          r.json().then(data => {
+            setFingerprint(fp);
+            setKeyChanged(data.detail === 'host_key_changed');
+          }).catch(() => setFingerprint(fp));
+        }
+        return null;
+      })
+      .catch(() => {});
+  }, [host]);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (busy || locked) return;
@@ -45,9 +66,11 @@ export function PasswordPrompt({ host, onConnected }: Props) {
         return;
       }
       if (resp.status === 419) {
-        const detail = resp.headers.get('X-Fingerprint') || '';
-        setFingerprint(detail);
-        setKeyChanged(resp.json && (await resp.json().catch(() => ({}))).detail === 'host_key_changed');
+        const fp = resp.headers.get('X-Fingerprint') || '';
+        const kd = resp.headers.get('X-Key-Data') || '';
+        setFingerprint(fp);
+        setKeyData(kd);
+        setKeyChanged((await resp.json().catch(() => ({}))).detail === 'host_key_changed');
         return;
       }
       if (resp.status === 423) {
@@ -70,15 +93,17 @@ export function PasswordPrompt({ host, onConnected }: Props) {
     }
   }
 
+  const [keyData, setKeyData] = useState('');
+
   async function trustKey() {
-    if (!fingerprint) return;
+    if (!keyData) return;
     setBusy(true);
     try {
       const resp = await fetch(`/api/v1/hosts/${encodeURIComponent(host)}/trust`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ key_data: fingerprint }),
+        body: JSON.stringify({ key_data: keyData }),
       });
       if (resp.ok) {
         setFingerprint(null);

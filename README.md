@@ -15,6 +15,7 @@ A local-first developer tool that provides a browser-based file system explorer 
 - **2FA (daemon mode)** — Optional TOTP challenge for direct browser access; CLI path (`surf-ssh url`) unchanged
 - **Zero config** — Reuses `~/.ssh/config` host aliases and keys
 - **Ad-hoc hosts** — Connect to hosts without `~/.ssh/config` entries via password auth (browser prompt or CLI `user@host`); passwords are held in daemon memory only, never written to disk
+- **Free-form commands** — Paste an `ssh`/`scp` command string: `surf-ssh open --cmd "ssh root@host -i ~/.ssh/key -p 2222"` — parsed into a config entry under a memorable name; ephemeral by default, `--save <name>` makes it permanent
 - **Cross-platform** — Works on macOS and Windows
 
 ## Quick Start
@@ -28,6 +29,12 @@ cd ui && npm install && npm run build && cd ..
 
 # Open a remote host (auto-exit on, opens browser)
 surf-ssh open my-server
+
+# From an ssh command string (ephemeral — removed on exit)
+surf-ssh open --cmd "ssh root@10.0.0.5 -i ~/.ssh/key -p 2222"
+
+# From an ssh command string (persistent — saved in ~/.ssh/config)
+surf-ssh open --cmd "ssh root@10.0.0.5 -i ~/.ssh/key -p 2222" --save prod-jump
 
 # Without opening a browser
 surf-ssh open my-server --no-browser

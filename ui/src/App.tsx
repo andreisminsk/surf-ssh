@@ -233,7 +233,7 @@ function App() {
   // host-scoped API call to the PasswordPrompt view
   useEffect(() => {
     setAuthFlowErrorHandler((host, detail) => {
-      if (detail === 'password_required' || detail === 'invalid_password') {
+      if (['password_required', 'invalid_password', 'host_key_unknown', 'host_key_changed'].includes(detail)) {
         setPasswordHost(host);
       }
     });
@@ -312,11 +312,33 @@ function App() {
       .catch(() => {});
   }, [host, urlPath, fetchHome]);
 
+  // Track whether we've already tried the global fallback for this host
+  const [triedGlobalFallback, setTriedGlobalFallback] = useState(false);
+
   useEffect(() => {
     if (host && rootPath) {
       loadChildren(rootPath);
     }
   }, [host, rootPath, loadChildren]);
+
+  // If the home tree shows nothing (empty, or only hidden dotfiles —
+  // RunPod-style /root), fall back to the global filesystem (/)
+  useEffect(() => {
+    const entries = rootPath ? tree[rootPath] : undefined;
+    const visible = (entries || []).filter(n => !n.name.startsWith('.'));
+    const shouldFallBack =
+      host &&
+      !triedGlobalFallback &&
+      rootPath &&
+      rootPath !== '/' &&
+      !loading[rootPath] &&
+      entries !== undefined &&
+      visible.length === 0;
+    if (shouldFallBack) {
+      setTriedGlobalFallback(true);
+      setRootPath('/');
+    }
+  }, [host, rootPath, loading, tree, triedGlobalFallback]);
 
   // Close new-tab dropdown on outside click
   useEffect(() => {

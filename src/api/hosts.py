@@ -133,7 +133,7 @@ async def authenticate_host(
         raise HTTPException(
             status_code=419,
             detail=e.kind,
-            headers={"X-Fingerprint": e.fingerprint},
+            headers={"X-Fingerprint": e.fingerprint, "X-Key-Data": e.key_data},
         ) from e
     except PasswordRequiredError:
         # No password on file yet — the UI must render the prompt
@@ -172,9 +172,12 @@ async def trust_host_key(
     req: TrustRequest,
     pool: ConnectionPool = Depends(get_pool),
 ) -> dict[str, str]:
-    """Trust a host's presented key (TOFU confirm). Session-protected."""
-    if not pool.is_adhoc(host):
-        raise HTTPException(status_code=404, detail="Not an ad-hoc host")
+    """Trust a host's presented key (TOFU confirm). Session-protected.
+
+    Works for both ad-hoc and config hosts: the key is written to
+    ~/.surf-ssh/known_hosts (our TOFU store), which is merged with the
+    user's ~/.ssh/known_hosts at validation time.
+    """
     try:
         pool.trust_host_key(host, req.key_data.encode("utf-8"))
     except ValueError as e:
@@ -197,7 +200,7 @@ async def host_status(
         return {"host": host, "status": status, "platform": platform}
     except HostKeyError as e:
         raise HTTPException(
-            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint}
+            status_code=419, detail=e.kind, headers={"X-Fingerprint": e.fingerprint, "X-Key-Data": e.key_data}
         ) from e
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -212,5 +215,13 @@ async def host_home(
     try:
         home = await sftp.realpath(host, ".")
         return {"host": host, "home": home}
+    except HostKeyError as e:
+        raise HTTPException(
+            status_code=419,
+            detail=e.kind,
+            headers={"X-Fingerprint": e.fingerprint, "X-Key-Data": e.key_data},
+        ) from e
+    except PasswordRequiredError:
+        raise HTTPException(status_code=401, detail="password_required") from None
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Cannot resolve home: {e}") from e

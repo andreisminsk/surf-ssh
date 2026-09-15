@@ -14,7 +14,7 @@ import asyncssh
 
 from src.ssh.adhoc import AdHocHostRegistry
 from src.ssh.config_parser import SSHConfigParser
-from src.ssh.host_keys import HostKeyError, HostKeyTrust
+from src.ssh.host_keys import HostKeyError, HostKeyTrust, TofuSSHClient
 
 
 class PasswordRequiredError(ConnectionError):
@@ -169,19 +169,25 @@ class ConnectionPool:
             adhoc = self._adhoc_registry.resolve(host)
             if adhoc is not None:
                 logger.info("Opening SSH connection to %s (ad-hoc)", host)
+                tofu_client = TofuSSHClient()
+                # Always validate against our TOFU store — even when empty.
+                # An empty SSHKnownHosts means every key is "not trusted" →
+                # validate_host_public_key fires → key captured → 419 →
+                # user confirms → key stored → next connect validates.
+                # (Previously: empty file → known_hosts=None → validation
+                # disabled entirely — a MITM gap for first connections.)
                 connect_kwargs: dict[str, Any] = {
                     "port": adhoc.port,
                     "password": self._passwords.get(host),
-                    "known_hosts": self._host_key_trust.trusted_keys() or None,
+                    "known_hosts": self._host_key_trust.trusted_keys(),
                     "keepalive_interval": 30,
+                    "client_factory": lambda: tofu_client,
                 }
                 if adhoc.user is not None:
                     # username=None crashes AsyncSSH saslprep — omit entirely
                     connect_kwargs["username"] = adhoc.user
                 try:
                     conn = await asyncssh.connect(adhoc.hostname, **connect_kwargs)
-                except asyncssh.HostKeyNotVerifiable as e:
-                    raise self._host_key_trust.translate_connect_error(e) from e
                 except asyncssh.PermissionDenied as e:
                     logger.error("SSH auth to %s failed: %s", host, e)
                     if self._passwords.get(host) is None:
@@ -191,6 +197,19 @@ class ConnectionPool:
                         raise PasswordRequiredError(host) from e
                     raise ConnectionError(f"Cannot connect to {host}: {e}") from e
                 except (asyncssh.Error, socket.gaierror, ConnectionError, OSError) as e:
+                    # TOFU: the client captured the server's key before failing.
+                    # This check must precede HostKeyNotVerifiable translation —
+                    # the captured key carries the data the UI needs to trust.
+                    if tofu_client.captured_key is not None:
+                        key = tofu_client.captured_key
+                        try:
+                            fingerprint = key.get_fingerprint("sha256")
+                        except Exception:
+                            fingerprint = ""
+                        key_data = key.export_public_key("openssh").decode("utf-8", "replace").strip()
+                        raise HostKeyError("host_key_unknown", fingerprint, key_data) from e
+                    if isinstance(e, asyncssh.HostKeyNotVerifiable):
+                        raise self._host_key_trust.translate_connect_error(e) from e
                     logger.error("SSH connection to %s failed: %s", host, e)
                     raise ConnectionError(f"Cannot connect to {host}: {e}") from e
                 self._connections[host] = conn
@@ -223,6 +242,14 @@ class ConnectionPool:
                 options = asyncssh.SSHClientConnectionOptions(
                     options=options, username=username_override
                 )
+            # TOFU capture for config hosts too: unknown/changed keys must
+            # carry the real key data so the UI trust dialog can store it.
+            tofu_client = TofuSSHClient()
+            # Validate against BOTH the user's ~/.ssh/known_hosts AND our
+            # TOFU store (~/.surf-ssh/known_hosts) — keys trusted via the
+            # UI dialog are written to ours, so without merging them the
+            # trust flow would never take effect for config hosts.
+            merged_known_hosts = self._host_key_trust.merged_known_hosts()
             try:
                 conn = await asyncssh.connect(
                     cfg["hostname"],
@@ -231,11 +258,9 @@ class ConnectionPool:
                     tunnel=tunnel,
                     keepalive_interval=30,
                     password=password,
+                    known_hosts=merged_known_hosts,
+                    client_factory=lambda: tofu_client,
                 )
-            except asyncssh.HostKeyNotVerifiable as e:
-                # Config hosts validate against ~/.ssh/known_hosts —
-                # surface unknown/changed keys via the same taxonomy
-                raise self._host_key_trust.translate_connect_error(e) from e
             except asyncssh.PermissionDenied as e:
                 logger.error("SSH auth to %s failed: %s", host, e)
                 if self._passwords.get(host) is None:
@@ -246,6 +271,21 @@ class ConnectionPool:
                     raise PasswordRequiredError(host) from e
                 raise ConnectionError(f"Cannot connect to {host}: {e}") from e
             except (asyncssh.Error, socket.gaierror, ConnectionError, OSError) as e:
+                # TOFU: the client captured the server's key before failing.
+                # Precedes HostKeyNotVerifiable translation — the captured
+                # key carries the data the UI needs to trust it.
+                if tofu_client.captured_key is not None:
+                    key = tofu_client.captured_key
+                    try:
+                        fingerprint = key.get_fingerprint("sha256")
+                    except Exception:
+                        fingerprint = ""
+                    key_data = key.export_public_key("openssh").decode("utf-8", "replace").strip()
+                    raise HostKeyError("host_key_unknown", fingerprint, key_data) from e
+                if isinstance(e, asyncssh.HostKeyNotVerifiable):
+                    # Config hosts validate against ~/.ssh/known_hosts —
+                    # surface unknown/changed keys via the same taxonomy
+                    raise self._host_key_trust.translate_connect_error(e) from e
                 logger.error("SSH connection to %s failed: %s", host, e)
                 raise ConnectionError(f"Cannot connect to {host}: {e}") from e
             self._connections[host] = conn
@@ -288,11 +328,21 @@ class ConnectionPool:
         self._passwords.pop(host, None)
 
     def trust_host_key(self, host: str, key_data: bytes) -> None:
-        """Trust a host's presented key (TOFU confirm from the UI)."""
+        """Trust a host's presented key (TOFU confirm from the UI).
+
+        Works for ad-hoc and config hosts alike: resolves the real
+        hostname/port and writes to our TOFU store.
+        """
         adhoc = self._adhoc_registry.resolve(host)
-        if adhoc is None:
-            raise ValueError(f"Not an ad-hoc host: {host}")
-        self._host_key_trust.trust(adhoc.hostname, adhoc.port, key_data)
+        if adhoc is not None:
+            self._host_key_trust.trust(adhoc.hostname, adhoc.port, key_data)
+            return
+        # Config alias: resolve hostname/port from ~/.ssh/config
+        try:
+            cfg = self._config_parser.get_host_config(host)
+            self._host_key_trust.trust(cfg["hostname"], cfg["port"], key_data)
+        except Exception as e:
+            raise ValueError(f"Unknown host: {host}") from e
 
     def get_sftp_semaphore(self, host: str) -> asyncio.Semaphore:
         """Get the SFTP channel semaphore for a host."""

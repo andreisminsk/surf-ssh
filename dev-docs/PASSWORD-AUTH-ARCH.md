@@ -174,6 +174,65 @@ the UI fingerprint dialog works for both host types.
 | Config alias | Full known_hosts validation | `~/.ssh/known_hosts` (user's own) |
 | Ad-hoc | TOFU with fingerprint confirm | `~/.surf-ssh/known_hosts` (ours, 0600) |
 
+**Host key changes are expected in some environments** (e.g., RunPod
+rotates pods actively — same hostname, new instance, new key). The UI
+distinguishes `host_key_unknown` (new host, normal TOFU) from
+`host_key_changed` (known host, key differs — possible MITM). Both
+surface the fingerprint for explicit confirmation. For pod-rotation
+scenarios, the user confirms the new key each time the pod changes;
+this is the correct behavior — silently accepting changed keys would
+defeat the purpose of host key validation.
+
+### 8.1 TOFU Implementation (post-implementation refinement)
+
+**Gap found during E2E:** the initial implementation returned
+`known_hosts=None` when the trust file was empty — **disabling host key
+validation entirely** for first connections to ad-hoc hosts (MITM gap).
+The `TofuSSHClient` capture path existed but never fired, because
+`HostKeyNotVerifiable` was caught and translated before the captured
+key was checked.
+
+**Fix — three parts:**
+
+1. **`trusted_keys()` always returns an `SSHKnownHosts` object** (empty
+   when nothing is trusted). An empty object means every presented key
+   is "not trusted" → `validate_host_public_key` fires → key captured.
+   Never `None` — that disables validation.
+
+2. **`TofuSSHClient`** (subclass of `asyncssh.SSHClient`): overrides
+   `validate_host_public_key` to capture the server's actual public
+   key (`SSHKey` object) and return `False` — the connection fails, but
+   the key is in hand. Passed via `client_factory`.
+
+3. **Exception ordering:** the captured-key check precedes the
+   `HostKeyNotVerifiable` translation in the pool's error handling.
+   The captured key carries the full OpenSSH-format public key
+   (`key.export_public_key("openssh")`) plus its SHA256 fingerprint —
+   both sent to the UI (`X-Key-Data` / `X-Fingerprint` headers).
+
+**Trust flow (verified E2E):**
+
+```
+1. First connection to ad-hoc host
+   → key not in trust store → TofuSSHClient captures it → connect fails
+   → 419 host_key_unknown + X-Key-Data (real public key) + X-Fingerprint
+2. UI shows fingerprint dialog → user confirms
+   → POST /hosts/{host}/trust {key_data: "<real public key>"}
+   → written to ~/.surf-ssh/known_hosts as "[host]:port <key>"
+3. Second connection → key IS in trust store → validation passes → 200
+4. Key rotation (RunPod): presented key ≠ trusted key
+   → host_key_changed warning (red, explicit confirm required)
+```
+
+**Key detail:** the trust endpoint accepts the **full public key**, not
+a fingerprint — a fingerprint cannot be written to known_hosts. The
+UI previously sent the fingerprint (the original bug); it now reads
+`X-Key-Data` from the 419 response.
+
+**Trust endpoint scope:** works for both ad-hoc and config hosts —
+for config aliases it resolves hostname/port from `~/.ssh/config` and
+writes to our TOFU store (never the user's `~/.ssh/known_hosts`).
+
 ## 9. Risks & Mitigations
 
 | Risk | Mitigation |
