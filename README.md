@@ -1,6 +1,11 @@
 # Surf SSH
 
-A local-first developer tool that provides a browser-based file system explorer and terminal for remote machines accessible via SSH. It leverages existing SSH configurations (including complex `ProxyJump` setups) without requiring any agent software on the remote machine.
+A developer productivity tool that provides a browser-based file system explorer and terminal for remote machines accessible via SSH.
+Primary feature - enhances traditional SSH terminal experience with possibility to browse and preview remote files in single workspace.   
+To make SSH session experience complete - it also adds local console to the workspace. 
+Thus users have in hands all that they usually need while working with SSH quickly accesible - remote terminal, file browser and preview, 
+plus local console. 
+It leverages existing SSH configurations (including complex `ProxyJump` setups) without requiring any agent software on the remote machine.
 
 ## Features
 
