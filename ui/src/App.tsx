@@ -256,7 +256,7 @@ function App() {
   const [homePath, setHomePath] = useState(urlPath || '/');
 
   const { status } = useConnection(host);
-  const { tree, loading, selectedFile, error, clearError, loadChildren, selectFile, refreshAll } = useFileSystem(host);
+  const { tree, truncated, loading, selectedFile, error, clearError, loadChildren, loadMore, selectFile, refreshTree, refreshAll } = useFileSystem(host);
   useLiveness(host);
   const [platform, setPlatform] = useState('unix');
   const [sidebarWidth, setSidebarWidth] = useState(300);
@@ -461,6 +461,9 @@ function App() {
           onToggle={loadChildren}
           onSelectFile={(p) => { selectFile(p); activateTab(tabs.find(t => t.type === 'files')!.id); }}
           onRefreshAll={refreshAll}
+          truncated={truncated}
+          onLoadMore={loadMore}
+          onRefreshFolder={refreshTree}
           rootPath={rootPath}
           homePath={homePath}
           onRootChange={setRootPath}

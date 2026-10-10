@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 import asyncssh
@@ -98,5 +99,22 @@ class SFTPClient:
             sftp = await conn.start_sftp_client()
             try:
                 return await sftp.realpath(path)
+            finally:
+                sftp.exit()
+
+    @asynccontextmanager
+    async def session(self, host: str) -> AsyncGenerator[asyncssh.SFTPClient, None]:
+        """Yield a raw SFTP client for multiple ops over a single channel.
+
+        Tree building does one readdir plus a stat per symlink — opening a
+        fresh SFTP channel per call multiplies latency and channel churn.
+        The per-host SFTP semaphore is held for the whole session.
+        """
+        conn = await self._pool.get_connection(host)
+        sem = self._pool.get_sftp_semaphore(host)
+        async with sem:
+            sftp = await conn.start_sftp_client()
+            try:
+                yield sftp
             finally:
                 sftp.exit()

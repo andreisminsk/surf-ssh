@@ -54,7 +54,7 @@ async def get_tree(
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Max entries per level"),
     sftp: SFTPClient = Depends(get_sftp_client),
 ) -> TreeResponse:
-    """Get a depth-limited, entry-capped directory tree."""
+    """Get an entry-capped directory listing (flat; subdirs load lazily)."""
     try:
         validated = await resolve_and_validate(sftp, host, path)
     except PathValidationError as e:
@@ -74,7 +74,7 @@ async def get_tree(
         raise HTTPException(status_code=503, detail=str(e)) from e
 
     try:
-        return await _build_tree(host, validated, depth, limit, sftp)
+        return await _build_tree(host, validated, limit, sftp)
     except asyncssh.Error as e:
         if "No such file" in str(e):
             raise HTTPException(status_code=404, detail="Directory not found") from e
@@ -94,49 +94,40 @@ async def get_tree(
 async def _build_tree(
     host: str,
     path: str,
-    depth: int,
     limit: int,
     sftp: SFTPClient,
 ) -> TreeResponse:
-    """Recursively build tree response with caps."""
-    entries = await sftp.list_dir(host, path)
-    # Filter out . and .. entries — they cause infinite recursion in the UI
-    entries = [e for e in entries if e.filename not in (".", "..")]
-    entries.sort(key=lambda e: (not _is_dir_from_attrs(e), e.filename))
+    """Build a flat, entry-capped directory listing over one SFTP channel.
 
-    truncated = len(entries) > limit
-    entries = entries[:limit]
+    The `depth` query param is validated for API compatibility but the
+    response is always a single level — the frontend lazy-loads each
+    subdirectory with its own request (FileTree/useFileSystem).
+    """
+    async with sftp.session(host) as sess:
+        entries = await sess.readdir(path)
+        # Filter out . and .. entries — they cause infinite recursion in the UI
+        entries = [e for e in entries if e.filename not in (".", "..")]
+        entries.sort(key=lambda e: (not _is_dir_from_attrs(e), e.filename))
 
-    children: list[TreeNode] = []
-    for entry in entries:
-        entry_path = str(PurePosixPath(path) / entry.filename)
-        is_dir = _is_dir_from_attrs(entry)
-        # Follow symlinks to determine if the target is a directory
-        if not is_dir and _is_symlink(entry):
-            try:
-                target_stat = await sftp.stat(host, entry_path)
-                if target_stat.permissions is not None:
-                    is_dir = bool(target_stat.permissions & 0o040000)
-                elif getattr(target_stat, "longname", ""):
-                    is_dir = target_stat.longname[0] == "d"
-            except asyncssh.Error:
-                pass  # Broken symlink — treat as file
-        modified = None
-        if entry.attrs.mtime:
-            modified = datetime.fromtimestamp(entry.attrs.mtime, tz=timezone.utc)
+        truncated = len(entries) > limit
+        entries = entries[:limit]
 
-        if is_dir and depth > 1:
-            # Recurse into subdirectory
-            sub_tree = await _build_tree(host, entry_path, depth - 1, limit, sftp)
-            children.append(TreeNode(
-                path=entry_path,
-                name=entry.filename,
-                type="directory",
-                modified=modified,
-            ))
-            # Note: children of subdirs are not expanded in this flat model;
-            # the frontend fetches them lazily via separate requests.
-        else:
+        children: list[TreeNode] = []
+        for entry in entries:
+            entry_path = str(PurePosixPath(path) / entry.filename)
+            is_dir = _is_dir_from_attrs(entry)
+            # Follow symlinks to determine if the target is a directory
+            if not is_dir and _is_symlink(entry):
+                try:
+                    target_stat = await sess.stat(entry_path)
+                    if target_stat.permissions is not None:
+                        is_dir = bool(target_stat.permissions & 0o040000)
+                except asyncssh.Error:
+                    pass  # Broken symlink — treat as file
+            modified = None
+            if entry.attrs.mtime:
+                modified = datetime.fromtimestamp(entry.attrs.mtime, tz=timezone.utc)
+
             children.append(TreeNode(
                 path=entry_path,
                 name=entry.filename,

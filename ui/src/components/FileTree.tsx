@@ -13,6 +13,9 @@ interface Props {
   onToggle: (path: string) => void;
   onSelectFile: (path: string) => void;
   onRefreshAll: (paths: string[]) => void;
+  truncated: Record<string, boolean>;
+  onLoadMore: (path: string) => void;
+  onRefreshFolder: (path: string, expandedDescendants: string[]) => void;
   rootPath: string;
   homePath: string;
   onRootChange: (path: string) => void;
@@ -143,7 +146,7 @@ function buildScpCommand(host: string, remotePath: string, direction: 'download'
   }
 }
 
-export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelectFile, onRefreshAll, rootPath, homePath, onRootChange, platform, width }: Props) {
+export function FileTree({ host, tree, truncated, loading, selectedFile, onToggle, onSelectFile, onRefreshAll, onLoadMore, onRefreshFolder, rootPath, homePath, onRootChange, platform, width }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set([rootPath]));
   const [showHidden, setShowHidden] = useState(false);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
@@ -151,6 +154,9 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
   const [copyFailed, setCopyFailed] = useState<{ x: number; y: number } | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string; isDir: boolean } | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement>(null);
+  // Expansion handed to the rootPath-change effect (which would otherwise
+  // reset `expanded` right after switchToFull sets it)
+  const pendingExpandRef = useRef<Set<string> | null>(null);
 
   useLayoutEffect(() => {
     if (ctxMenu && ctxMenuRef.current) {
@@ -180,8 +186,7 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
   const isFullTree = rootPath === '/';
 
   const switchToFull = () => {
-    onRootChange('/');
-    // Expand path to selected file so it remains visible
+    // Expand the selected file's ancestors so it remains visible
     if (selectedFile) {
       const parts = selectedFile.split('/').filter(Boolean);
       const pathsToExpand: string[] = [];
@@ -190,14 +195,13 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
         current += '/' + part;
         pathsToExpand.push(current);
       }
-      setExpanded(new Set(['/root', ...pathsToExpand]));
+      pendingExpandRef.current = new Set(['/', ...pathsToExpand]);
       // Load each ancestor
       for (const p of pathsToExpand) {
         onToggle(p);
       }
-    } else {
-      setExpanded(new Set(['/']));
     }
+    onRootChange('/');
   };
 
   const switchToHome = () => {
@@ -206,7 +210,12 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
   };
 
   useEffect(() => {
-    setExpanded(new Set([rootPath]));
+    if (pendingExpandRef.current) {
+      setExpanded(pendingExpandRef.current);
+      pendingExpandRef.current = null;
+    } else {
+      setExpanded(new Set([rootPath]));
+    }
   }, [rootPath]);
 
   const toggle = (path: string) => {
@@ -253,6 +262,16 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
               </div>
             )}
             {tree[node.path]?.map(child => renderNode(child, depth + 1))}
+            {truncated[node.path] && !loading[node.path] && (
+              <div
+                className="tree-node"
+                style={{ paddingLeft: `${1.5 + depth * 1}rem`, color: 'var(--accent)', cursor: 'pointer' }}
+                onClick={(e) => { e.stopPropagation(); onLoadMore(node.path); }}
+                title="Directory truncated — load all entries"
+              >
+                <span>⤵ Load more…</span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -362,6 +381,31 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
           >
             ⬆ Copy 'scp upload' command
           </button>
+          {ctxMenu.isDir && (
+            <>
+              <div style={{ height: '1px', background: 'var(--border)', margin: '4px 0' }} />
+              <button
+                onClick={() => {
+                  // Reload this folder; expanded subfolders are passed along
+                  // so visible branches are re-fetched too, not blanked.
+                  const descendants = Array.from(expanded).filter(p => p.startsWith(ctxMenu.path + '/'));
+                  onRefreshFolder(ctxMenu.path, descendants);
+                  setCtxMenu(null);
+                }}
+                style={{
+                  display: 'block', width: '100%', padding: '6px 12px',
+                  background: 'none', border: 'none', color: 'var(--text-primary)',
+                  cursor: 'pointer', textAlign: 'left', fontSize: '0.85rem',
+                  whiteSpace: 'nowrap',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-tertiary)')}
+                onMouseLeave={(e) => (e.currentTarget.style.background = 'none')}
+                title="Reload this folder from the remote machine"
+              >
+                🔄 Refresh folder
+              </button>
+            </>
+          )}
         </div>
       )}
       <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -370,6 +414,16 @@ export function FileTree({ host, tree, loading, selectedFile, onToggle, onSelect
           <div className="tree-node">
             <span className="loading-spinner" />
             <span>Loading...</span>
+          </div>
+        )}
+        {truncated[rootPath] && !loading[rootPath] && (
+          <div
+            className="tree-node"
+            style={{ color: 'var(--accent)', cursor: 'pointer' }}
+            onClick={() => onLoadMore(rootPath)}
+            title="Directory truncated — load all entries"
+          >
+            <span>⤵ Load more…</span>
           </div>
         )}
       </div>
