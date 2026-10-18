@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -43,6 +44,7 @@ class TestCreateSession:
         for f in session_manager._sessions_dir.iterdir():
             assert token not in f.name
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="0600 permission bits are POSIX-only (no-op on NTFS)")
     def test_session_file_is_owner_only(self, session_manager):
         token = session_manager.create_session()
         session_file = session_manager._session_path(token)

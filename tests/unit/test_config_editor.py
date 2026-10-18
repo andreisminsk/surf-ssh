@@ -1,5 +1,7 @@
 """Unit tests for ConfigEditor — marker-delimited config append/remove."""
 
+import sys
+
 import pytest
 
 from src.ssh.config_editor import ConfigEditor, ConfigEditorError
@@ -50,11 +52,13 @@ class TestAppend:
         content = (tmp_path / "config").read_text()
         assert "# surf-ssh:saved:persistent" in content
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="0600 permission bits are POSIX-only (no-op on NTFS)")
     def test_file_permissions(self, editor, tmp_path):
         editor.append_entry("test", {"hostname": "10.0.0.5"}, tag="ephemeral")
         mode = (tmp_path / "config").stat().st_mode & 0o777
         assert mode == 0o600
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="0600 permission bits are POSIX-only (no-op on NTFS)")
     def test_preserves_existing_permissions(self, editor_with_content, tmp_path):
         import os
         os.chmod(tmp_path / "config", 0o644)

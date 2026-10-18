@@ -1,6 +1,7 @@
 """Unit tests for HostKeyTrust — TOFU host key management."""
 
 import os
+import sys
 
 import pytest
 
@@ -39,6 +40,7 @@ class TestTrustedKeys:
         content = (tmp_path / "known_hosts").read_text()
         assert content.startswith("example.com ")
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="0600 permission bits are POSIX-only (no-op on NTFS)")
     def test_file_permissions_0600(self, trust, tmp_path):
         key_line = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB1234567890abc"
         trust.trust("example.com", 22, key_line.encode())

@@ -295,12 +295,18 @@ def open(
 
         signal.signal(signal.SIGINT, _win_sigint)
 
+    exit_code = 0
     try:
         asyncio.run(_serve())
     except KeyboardInterrupt:
         # Fallback: if signal handler didn't catch it (e.g. interrupt
         # during asyncio.run startup), handle here.
         console.print("\n[yellow]Shutting down surf-ssh...[/yellow]")
+    except Exception:
+        # Surface the real error — the force-exit below would otherwise
+        # swallow the traceback and make a crash look like a clean exit.
+        console.print_exception()
+        exit_code = 1
     finally:
         # Remove ephemeral config entries created by --cmd (without --save)
         if _ephemeral_name:
@@ -312,7 +318,7 @@ def open(
         # Safety net: force exit in case non-daemon executor threads
         # (e.g. blocked PTY reads) keep the process alive.
         import os
-        os._exit(0)
+        os._exit(exit_code)
 
 
 @app.command()
@@ -451,51 +457,46 @@ def daemon(
 
         signal.signal(signal.SIGINT, _win_sigint)
 
+    exit_code = 0
     try:
         asyncio.run(_serve())
     except KeyboardInterrupt:
         console.print("\n[yellow]Shutting down surf-ssh...[/yellow]")
+    except Exception:
+        # Surface the real error — the force-exit below would otherwise
+        # swallow the traceback and make a crash look like a clean exit.
+        console.print_exception()
+        exit_code = 1
     finally:
         console.print("[green]Goodbye![/green]")
         import os
-        os._exit(0)
+        os._exit(exit_code)
 
 
 def _mint_url_via_socket(timeout: float = 5.0) -> str | None:
     """Ask the running daemon to mint a fresh session URL.
 
-    Connects to the control socket (~/.surf-ssh/control.sock, 0600,
-    same-user only) and sends {"command": "mint"}. Returns the URL or
-    None if no daemon is listening.
+    Connects to the daemon's control channel (Unix socket on POSIX,
+    secret-authenticated TCP loopback on Windows) and sends
+    {"command": "mint"}. Returns the URL or None if no daemon is
+    listening.
     """
     import asyncio
-    import json as _json
+    import json
 
-    from src.daemon.control import CONTROL_SOCK_NAME
-
-    sock_path = CONFIG_DIR / CONTROL_SOCK_NAME
+    from src.daemon.control import control_request
 
     async def _request() -> str | None:
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(str(sock_path)), timeout=timeout
+            response = await asyncio.wait_for(
+                control_request(CONFIG_DIR, {"command": "mint"}), timeout=timeout
             )
-        except (FileNotFoundError, ConnectionError, asyncio.TimeoutError):
+        except (
+            FileNotFoundError, ConnectionError, OSError,
+            asyncio.TimeoutError, json.JSONDecodeError, UnicodeDecodeError,
+        ):
             return None
-        try:
-            writer.write((_json.dumps({"command": "mint"}) + "\n").encode("utf-8"))
-            await writer.drain()
-            raw = await asyncio.wait_for(reader.readline(), timeout=timeout)
-            response = _json.loads(raw.decode("utf-8"))
-            return response.get("url")
-        except (json.JSONDecodeError, asyncio.TimeoutError, UnicodeDecodeError):
-            return None
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
+        return response.get("url")
 
     return asyncio.run(_request())
 

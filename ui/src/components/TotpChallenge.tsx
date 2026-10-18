@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface Props {
   onAuthenticated: () => void;
@@ -10,6 +10,13 @@ export function TotpChallenge({ onAuthenticated }: Props) {
   const [error, setError] = useState('');
   const [locked, setLocked] = useState(0);
   const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Focus the code input on mount (autoFocus alone is unreliable when the
+  // component mounts after async 401 handling) and after mode toggles.
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, [useBackup]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -55,6 +62,7 @@ export function TotpChallenge({ onAuthenticated }: Props) {
           {useBackup ? 'Enter a backup code' : 'Enter the 6-digit code from your authenticator app'}
         </p>
         <input
+          ref={inputRef}
           autoFocus
           value={code}
           onChange={(e) => {

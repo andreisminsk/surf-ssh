@@ -1,6 +1,7 @@
 """Unit tests for TotpManager — TOTP 2FA core logic."""
 
 import json
+import sys
 import time
 
 import pyotp
@@ -37,9 +38,10 @@ class TestSetup:
         ok = manager.confirm_setup(secret, pyotp.TOTP(secret).now(), ["aaaa-bbbb"])
         assert ok is True
         assert manager.is_enabled() is True
-        # File is 0600
+        # File is 0600 (POSIX; permission bits are a no-op on NTFS)
         f = tmp_path / "totp.json"
-        assert f.stat().st_mode & 0o777 == 0o600
+        if sys.platform != "win32":
+            assert f.stat().st_mode & 0o777 == 0o600
         # Backup codes are hashed, not plaintext
         data = json.loads(f.read_text())
         assert "aaaa-bbbb" not in json.dumps(data)

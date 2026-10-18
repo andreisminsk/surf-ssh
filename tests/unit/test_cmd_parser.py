@@ -107,4 +107,7 @@ class TestEdgeCases:
 
     def test_identity_expansion(self):
         r = parse_ssh_command("ssh -i ~/custom/key root@10.0.0.5")
-        assert "/custom/key" in r["identityfile"]
+        # ~ expands to the home dir; separators differ per platform
+        # (POSIX "/home/u/custom/key", Windows "C:\Users\u\custom\key")
+        from pathlib import Path
+        assert Path(r["identityfile"]).parts[-2:] == ("custom", "key")
